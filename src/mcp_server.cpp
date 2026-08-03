@@ -204,14 +204,29 @@ json McpServer::handle_tools_list() {
             },
             {
                 {"name", "github_get_commits"},
-                {"description", "Get recent commits of a GitHub repository. Use for timeline reconstruction and activity analysis."},
+                {"description", "Get recent commits of a GitHub repository. Use for timeline reconstruction and activity analysis. Use branch/sha to query non-default branches."},
                 {"inputSchema", {
                     {"type", "object"},
                     {"properties", {
                         {"owner", {{"type", "string"}, {"description", "Repository owner"}}},
                         {"repo", {{"type", "string"}, {"description", "Repository name"}}},
                         {"limit", {{"type", "integer"}, {"default", 50}, {"minimum", 1}, {"maximum", 100}}},
-                        {"since", {{"type", "string"}, {"format", "date-time"}, {"description", "ISO 8601 datetime, only commits after this"}}}
+                        {"since", {{"type", "string"}, {"format", "date-time"}, {"description", "ISO 8601 datetime, only commits after this"}}},
+                        {"branch", {{"type", "string"}, {"description", "Branch name to query (e.g. codex/cxcore-integration)"}}},
+                        {"sha", {{"type", "string"}, {"description", "Override: branch name, tag name, or commit SHA (takes priority over branch)"}}}
+                    }},
+                    {"required", json::array({"owner", "repo"})}
+                }}
+            },
+            {
+                {"name", "github_get_branches"},
+                {"description", "List all branches of a repository. Use this before per-branch commit aggregation to discover branch names including those with slashes."},
+                {"inputSchema", {
+                    {"type", "object"},
+                    {"properties", {
+                        {"owner", {{"type", "string"}, {"description", "Repository owner"}}},
+                        {"repo", {{"type", "string"}, {"description", "Repository name"}}},
+                        {"limit", {{"type", "integer"}, {"default", 100}, {"minimum", 1}, {"maximum", 100}}}
                     }},
                     {"required", json::array({"owner", "repo"})}
                 }}
@@ -269,6 +284,78 @@ json McpServer::handle_tools_list() {
                     }},
                     {"required", json::array({"owner", "repo"})}
                 }}
+            },
+            {
+                {"name", "github_search_repositories"},
+                {"description", "Search repositories by project name, topic, language, stars, etc. Use for discovery (e.g. find popular C++ vision libraries)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"q", json::object({
+                            {"type", "string"},
+                            {"description", "GitHub search query. Supports qualifiers: language:C++, stars:>1000, topic:cv, user:octocat, pushed:>2025-01-01, fork:true, license:MIT, size:>1000"}
+                        })},
+                        {"sort", json::object({
+                            {"type", "string"},
+                            {"enum", json::array({"stars", "forks", "updated"})},
+                            {"description", "Sort field (omit for best-match)"}
+                        })},
+                        {"order", json::object({
+                            {"type", "string"},
+                            {"default", "desc"},
+                            {"enum", json::array({"asc", "desc"})}
+                        })},
+                        {"limit", json::object({
+                            {"type", "integer"},
+                            {"default", 30},
+                            {"minimum", 1},
+                            {"maximum", 100}
+                        })},
+                        {"page", json::object({
+                            {"type", "integer"},
+                            {"default", 1},
+                            {"minimum", 1},
+                            {"maximum", 10}
+                        })}
+                    })},
+                    {"required", json::array({"q"})}
+                })}
+            },
+            {
+                {"name", "github_search_users"},
+                {"description", "Search GitHub users/orgs by name, location, language, followers, etc. Use to discover authors or organizations matching a research topic."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"q", json::object({
+                            {"type", "string"},
+                            {"description", "GitHub user search query. Supports: type:user, type:org, followers:>100, location:China, language:C++, repos:>50, created:<2015-01-01"}
+                        })},
+                        {"sort", json::object({
+                            {"type", "string"},
+                            {"enum", json::array({"followers", "repositories", "joined"})},
+                            {"description", "Sort field (omit for best-match)"}
+                        })},
+                        {"order", json::object({
+                            {"type", "string"},
+                            {"default", "desc"},
+                            {"enum", json::array({"asc", "desc"})}
+                        })},
+                        {"limit", json::object({
+                            {"type", "integer"},
+                            {"default", 30},
+                            {"minimum", 1},
+                            {"maximum", 100}
+                        })},
+                        {"page", json::object({
+                            {"type", "integer"},
+                            {"default", 1},
+                            {"minimum", 1},
+                            {"maximum", 10}
+                        })}
+                    })},
+                    {"required", json::array({"q"})}
+                })}
             }
         })}
     };

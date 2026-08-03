@@ -96,11 +96,17 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
     std::string err;
     std::string owner, repo;
 
-    // 所有 tool 都需要 owner 和 repo
-    owner = get_string_arg(args, "owner", tool_name, true, err);
-    if (!err.empty()) return make_error_result(err);
-    repo = get_string_arg(args, "repo", tool_name, true, err);
-    if (!err.empty()) return make_error_result(err);
+    // github_search_* 工具只需要 query,不需要 owner/repo
+    bool is_search = (tool_name == "github_search_repositories" ||
+                      tool_name == "github_search_users");
+
+    if (!is_search) {
+        // 所有非搜索 tool 都需要 owner 和 repo
+        owner = get_string_arg(args, "owner", tool_name, true, err);
+        if (!err.empty()) return make_error_result(err);
+        repo = get_string_arg(args, "repo", tool_name, true, err);
+        if (!err.empty()) return make_error_result(err);
+    }
 
     try {
         if (tool_name == "github_get_repo_info") {
@@ -144,7 +150,20 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
             if (args.contains("since") && args["since"].is_string()) {
                 since = args["since"].get<std::string>();
             }
-            json r = client.get_recent_commits(owner, repo, limit, since);
+            // branch / sha: 优先 sha,其次 branch;允许传 "codex/cxcore-integration" 这样的分支名
+            std::optional<std::string> sha;
+            if (args.contains("sha") && args["sha"].is_string() && !args["sha"].get_ref<const std::string&>().empty()) {
+                sha = args["sha"].get<std::string>();
+            } else if (args.contains("branch") && args["branch"].is_string() && !args["branch"].get_ref<const std::string&>().empty()) {
+                sha = args["branch"].get<std::string>();
+            }
+            json r = client.get_recent_commits(owner, repo, limit, since, sha);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_get_branches") {
+            int limit = get_int_arg(args, "limit", 100, 1, 100, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.get_branches(owner, repo, limit);
             return make_success_result(r.dump());
 
         } else if (tool_name == "github_get_issues") {
@@ -183,6 +202,43 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
 
         } else if (tool_name == "github_summarize_repo") {
             json r = client.summarize_repo(owner, repo);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_search_repositories") {
+            // 必填 query,可选 sort / order / page
+            std::string query = get_string_arg(args, "q", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string sort = get_string_arg(args, "sort", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string order = get_string_arg(args, "order", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            if (order.empty()) order = "desc";
+            if (order != "asc" && order != "desc") {
+                return make_error_result("invalid value: order must be asc or desc");
+            }
+            int limit = get_int_arg(args, "limit", 30, 1, 100, err);
+            if (!err.empty()) return make_error_result(err);
+            int page = get_int_arg(args, "page", 1, 1, 10, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.search_repositories(query, sort, order, limit, page);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_search_users") {
+            std::string query = get_string_arg(args, "q", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string sort = get_string_arg(args, "sort", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string order = get_string_arg(args, "order", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            if (order.empty()) order = "desc";
+            if (order != "asc" && order != "desc") {
+                return make_error_result("invalid value: order must be asc or desc");
+            }
+            int limit = get_int_arg(args, "limit", 30, 1, 100, err);
+            if (!err.empty()) return make_error_result(err);
+            int page = get_int_arg(args, "page", 1, 1, 10, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.search_users(query, sort, order, limit, page);
             return make_success_result(r.dump());
 
         } else {

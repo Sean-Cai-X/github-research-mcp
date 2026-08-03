@@ -43,9 +43,14 @@ public:
     json get_contributors(const std::string& owner, const std::string& repo, int limit = 30);
 
     // 6. github_get_commits
+    // sha: 分支名、tag 或 commit SHA(默认走 HEAD 分支)
     json get_recent_commits(const std::string& owner, const std::string& repo,
                             int limit = 50,
-                            const std::optional<std::string>& since = std::nullopt);
+                            const std::optional<std::string>& since = std::nullopt,
+                            const std::optional<std::string>& sha = std::nullopt);
+
+    // 6b. github_get_branches(新增:枚举所有分支,用于按分支汇总提交)
+    json get_branches(const std::string& owner, const std::string& repo, int limit = 100);
 
     // 7. github_get_issues
     json get_issues(const std::string& owner, const std::string& repo,
@@ -75,8 +80,37 @@ public:
     json search_issues(const std::string& owner, const std::string& repo,
                        const std::string& query, int limit = 30);
 
+    // 11. github_search_repositories
+    // q 支持 GitHub Search 语法:language:、stars:>N、topic:、user:、pushed:>YYYY-MM-DD 等
+    // sort: stars / forks / updated(空表示按 best-match)
+    // order: desc(默认) / asc
+    json search_repositories(const std::string& query,
+                             const std::string& sort = "",
+                             const std::string& order = "desc",
+                             int limit = 30,
+                             int page = 1);
+
+    // 12. github_search_users
+    // q 支持 type:user、type:org、followers:>N、location:、language: 等
+    // sort: followers / repositories / joined(空表示按 best-match)
+    json search_users(const std::string& query,
+                      const std::string& sort = "",
+                      const std::string& order = "desc",
+                      int limit = 30,
+                      int page = 1);
+
     // WebView2 是否就绪
     bool is_ready() const { return http_client_.is_ready(); }
+
+    // 设置代理(必须在首次请求前调用)
+    // WebView2 模式:传递给 Chromium --proxy-server
+    // WinHTTP 模式:读取环境变量 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY
+    void set_proxy(const std::string& proxy_url) {
+        proxy_url_ = proxy_url;
+        if (!proxy_url.empty()) {
+            http_client_.set_proxy(proxy_url);
+        }
+    }
 
     // 当前使用的后端名称("webview2" 或 "winhttp")
     std::string backend_name() const {
@@ -127,6 +161,7 @@ private:
     std::unique_ptr<WinHttpClient> winhttp_client_;
     bool use_winhttp_fallback_ = false;
     int timeout_seconds_ = 30;
+    std::string proxy_url_;
     std::map<std::string, std::string> headers_;
     std::string base_url_ = "https://api.github.com";
 };

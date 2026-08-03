@@ -55,23 +55,31 @@ json summarize_repo(const json& info,
                     const json& latest_release) {
     json summary = json::object();
 
+    // 辅助:取 key 对应的 json 值,不存在则返回 json::value_t::null
+    // 避免 obj.value(key, nullptr) 在 key 存在且值为 string 时
+    // 触发 nlohmann/json type_error.302(get<std::nullptr_t>() 失败)
+    auto get_or_null = [](const json& obj, const char* key) -> json {
+        if (obj.contains(key)) return obj[key];
+        return json(nullptr);
+    };
+
     if (info.is_object()) {
-        summary["name"] = info.value("full_name", nullptr);
-        summary["description"] = info.value("description", nullptr);
-        summary["url"] = info.value("html_url", nullptr);
+        summary["name"] = get_or_null(info, "full_name");
+        summary["description"] = get_or_null(info, "description");
+        summary["url"] = get_or_null(info, "html_url");
         summary["stars"] = info.value("stargazers_count", 0);
         summary["forks"] = info.value("forks_count", 0);
         summary["open_issues"] = info.value("open_issues_count", 0);
-        summary["language"] = info.value("language", nullptr);
+        summary["language"] = get_or_null(info, "language");
         if (info.contains("license") && info["license"].is_object()) {
-            summary["license"] = info["license"].value("spdx_id", nullptr);
+            summary["license"] = get_or_null(info["license"], "spdx_id");
         } else {
             summary["license"] = nullptr;
         }
-        summary["created_at"] = info.value("created_at", nullptr);
-        summary["updated_at"] = info.value("updated_at", nullptr);
-        summary["pushed_at"] = info.value("pushed_at", nullptr);
-        summary["default_branch"] = info.value("default_branch", nullptr);
+        summary["created_at"] = get_or_null(info, "created_at");
+        summary["updated_at"] = get_or_null(info, "updated_at");
+        summary["pushed_at"] = get_or_null(info, "pushed_at");
+        summary["default_branch"] = get_or_null(info, "default_branch");
         if (info.contains("topics") && info["topics"].is_array()) {
             summary["topics"] = info["topics"];
         } else {
@@ -89,9 +97,9 @@ json summarize_repo(const json& info,
     if (latest_release.is_array() && !latest_release.empty()) {
         json r = latest_release[0];
         summary["latest_release"] = {
-            {"tag", r.value("tag_name", nullptr)},
-            {"name", r.value("name", nullptr)},
-            {"date", r.value("published_at", nullptr)}
+            {"tag", get_or_null(r, "tag_name")},
+            {"name", get_or_null(r, "name")},
+            {"date", get_or_null(r, "published_at")}
         };
     } else {
         summary["latest_release"] = nullptr;

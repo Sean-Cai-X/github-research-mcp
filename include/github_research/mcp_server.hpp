@@ -17,6 +17,10 @@ public:
               int timeout_seconds = 30);
     ~McpServer();
 
+    // 设置代理(必须在 run()/run_http() 前调用)
+    // proxy_url 格式:http://127.0.0.1:7897
+    void set_proxy(const std::string& proxy_url) { client_.set_proxy(proxy_url); }
+
     // 运行 server,阻塞直到 stdin 关闭或收到 shutdown
     // 返回进程退出码
     int run();

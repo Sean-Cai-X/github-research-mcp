@@ -38,6 +38,11 @@ public:
     // 返回 false 表示 Edge Runtime 缺失或环境创建失败
     bool initialize();
 
+    // 设置代理(必须在 initialize() 前调用)
+    // url 格式:http://127.0.0.1:7897 或 http://user:pass@host:port
+    // 传递给 WebView2 的 Chromium 内核 --proxy-server 参数
+    void set_proxy(const std::string& proxy_url) { proxy_url_ = proxy_url; }
+
     // 关闭并释放资源
     void shutdown();
 
@@ -85,6 +90,7 @@ private:
     std::string user_agent_;
     int timeout_seconds_;
     bool use_system_proxy_;
+    std::string proxy_url_;  // 显式代理 URL,空表示不设置
 };
 
 } // namespace github_research

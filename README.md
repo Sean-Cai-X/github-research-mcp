@@ -65,6 +65,117 @@ GITHUB_RESEARCH_TIMEOUT=30
 
 或在 MCP 客户端配置中直接设置环境变量(见 `mcp_config_example.json`)。
 
+## 代理设置
+
+WebView2 浏览器链路通过 Chromium 内核的 `--proxy-server` 命令行参数支持显式代理。
+代理优先级:**命令行 `--proxy`** > 环境变量(`HTTPS_PROXY` > `HTTP_PROXY` > `ALL_PROXY`)。
+
+### 代理配置链路
+
+| 层级 | 文件 | 职责 |
+|---|---|---|
+| 入口 | [src/main.cpp](src/main.cpp) | 解析 `--proxy` 参数,读取环境变量 |
+| 转发 | [include/github_research/mcp_server.hpp](include/github_research/mcp_server.hpp) | `McpServer::set_proxy` → `GitHubClient::set_proxy` |
+| 传递 | [include/github_research/github_client.hpp](include/github_research/github_client.hpp) | `GitHubClient::set_proxy` → `WebViewClient::set_proxy` |
+| 应用 | [src/webview_client.cpp](src/webview_client.cpp) | `CoreWebView2EnvironmentOptions` 携带 `--proxy-server` 启动 Chromium |
+
+> 注意:`set_proxy` 必须在 `initialize()` / `run()` / `run_http()` 之前调用,否则 Chromium 进程已启动,代理参数无法注入。
+
+### 使用方式
+
+#### 方式 1:命令行参数(推荐)
+
+```powershell
+.\github-research-mcp.exe --port 9876 --proxy http://127.0.0.1:7897
+```
+
+#### 方式 2:环境变量
+
+```powershell
+$Proxy = "http://127.0.0.1:7897"
+$env:HTTPS_PROXY = $Proxy
+$env:HTTP_PROXY  = $Proxy
+$env:ALL_PROXY   = $Proxy
+.\github-research-mcp.exe --port 9876
+```
+
+#### 方式 3:MCP 客户端配置(Claude Desktop / TRAE)
+
+在 `claude_desktop_config.json` 中通过 `env` 注入:
+
+```json
+{
+  "mcpServers": {
+    "github-research": {
+      "command": "D:\\DeerFlow\\DeerFlow++\\build\\Release\\github-research-mcp.exe",
+      "args": ["--proxy", "http://127.0.0.1:7897"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxx"
+      }
+    }
+  }
+}
+```
+
+或仅使用环境变量(让本服务自动读取):
+
+```json
+{
+  "mcpServers": {
+    "github-research": {
+      "command": "D:\\DeerFlow\\DeerFlow++\\build\\Release\\github-research-mcp.exe",
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxx",
+        "HTTPS_PROXY": "http://127.0.0.1:7897",
+        "HTTP_PROXY":  "http://127.0.0.1:7897",
+        "ALL_PROXY":   "http://127.0.0.1:7897"
+      }
+    }
+  }
+}
+```
+
+### 代理参数格式
+
+| 格式 | 示例 | 说明 |
+|---|---|---|
+| `http://host:port` | `http://127.0.0.1:7897` | HTTP 代理(Chromium 会自动去掉 `http://` 前缀) |
+| `http://user:pass@host:port` | `http://user:pass@proxy.example.com:8080` | 带认证的代理 |
+| `socks5://host:port` | `socks5://127.0.0.1:1080` | SOCKS5 代理 |
+
+> 注意:Chromium 的 `--proxy-server` 参数不接受带 `http://` scheme 前缀的 URL,本服务在 [src/webview_client.cpp](src/webview_client.cpp) 中已自动剥离该前缀,用户可直接使用完整 URL。
+
+### 启动日志验证
+
+代理生效时,stderr 会输出:
+
+```
+[mcp] proxy: http://127.0.0.1:7897
+[webview] using proxy: http://127.0.0.1:7897
+[webview] user data dir: ...
+[webview] initialized (origin: https://api.github.com)
+```
+
+未设置代理时输出:
+
+```
+[mcp] proxy: none (direct connection)
+```
+
+### 验证调用
+
+启动后通过 curl 调用任意 GitHub 工具,确认能正常返回数据即代理生效:
+
+```powershell
+curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
+  -H "Content-Type: application/json" ^
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"github_get_repo_info\",\"arguments\":{\"owner\":\"Sean-Cai-X\",\"repo\":\"github-research-mcp\"}}}"
+```
+
+### WinHTTP 模式(暂未启用)
+
+当前版本仅支持 WebView2 浏览器链路的代理设置。WinHTTP 客户端的代理参数读取已预留接口(`WinHttpClient` 的环境变量读取逻辑),后续启用时无需改动入口与配置链路。
+
 ## 客户端配置
 
 参考 `mcp_config_example.json`,在 MCP 客户端(如 Claude Desktop)配置文件中添加 4 个 MCP server:
@@ -110,7 +221,7 @@ llama-server.exe ^
 | `--mcp-headers` | 自定义请求头(JSON 格式) |
 | `--mcp-strict` | 严格模式,工具 schema 校验失败即拒绝 |
 
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `notifications/initialized` → `tools/list`,把 10 个 `github_*` 工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="github_get_repo_info", arguments={...})` 形式调用。
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `notifications/initialized` → `tools/list`,把 12 个 `github_*` 工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="github_get_repo_info", arguments={...})` 形式调用。
 
 #### curl 直接调用语义示例
 
@@ -329,7 +440,10 @@ Claude Desktop 配置(`claude_desktop_config.json`):
 | 看目录结构 | `github_get_tree` | `owner`, `repo`, `max_depth=3`, `recursive=true` |
 | 看语言分布 | `github_get_languages` | `owner`, `repo` |
 | 看贡献者 | `github_get_contributors` | `owner`, `repo`, `limit=30` |
-| 看近期提交 | `github_get_commits` | `owner`, `repo`, `limit=50` |
+| 看近期提交 | `github_get_commits` | `owner`, `repo`, `limit=50`, `branch`(可选) |
+| 看全部分支 | `github_get_branches` | `owner`, `repo`, `limit=100` |
+| 搜索仓库 | `github_search_repositories` | `q`, `sort`(可选), `order`, `limit`, `page` |
+| 搜索作者 | `github_search_users` | `q`, `sort`(可选), `order`, `limit`, `page` |
 | 看 Issues | `github_get_issues` | `owner`, `repo`, `state="all"`, `limit=30` |
 | 看 PR | `github_get_pull_requests` | `owner`, `repo`, `state="all"`, `limit=30` |
 | 看发布历史 | `github_get_releases` | `owner`, `repo`, `limit=10` |
@@ -388,11 +502,57 @@ cmake --build build --config Release --target test_smoke
 | `github_get_tree` | 目录树(格式化文本) |
 | `github_get_languages` | 语言分布 |
 | `github_get_contributors` | 贡献者列表 |
-| `github_get_commits` | 近期提交 |
+| `github_get_commits` | 近期提交(支持 `branch` / `sha` 参数查询非默认分支) |
+| `github_get_branches` | 全部分支列表(用于按分支汇总提交时间线) |
 | `github_get_issues` | Issues 列表 |
 | `github_get_pull_requests` | PR 列表 |
 | `github_get_releases` | 发布历史 |
 | `github_summarize_repo` | 综合摘要 |
+| `github_search_repositories` | 按项目名 / 语言 / topic / stars 搜索仓库 |
+| `github_search_users` | 按作者名 / 组织 / 地区 / 粉丝数搜索用户 |
+
+### 搜索查询语法示例
+
+`github_search_repositories` 与 `github_search_users` 的 `q` 参数支持 GitHub Search 语法,可叠加多个限定符:
+
+**仓库搜索**(`github_search_repositories`):
+
+| 场景 | `q` 示例 | 说明 |
+|---|---|---|
+| 按项目名 | `cxvision` | 模糊匹配 name / description / readme |
+| 按语言 | `opencv language:C++` | 限定主语言 |
+| 按 topic | `cv topic:computer-vision` | 按 GitHub Topics 分类 |
+| 按热度 | `vision stars:>1000` | stars 下限 |
+| 按活跃 | `cv pushed:>2025-01-01` | 排除僵尸项目 |
+| 按作者 | `cv user:opencv` | 限定 owner |
+| 按许可证 | `cv license:MIT` | 按 SPDX 许可证 |
+| 综合查询 | `vision language:C++ stars:>500 pushed:>2025-01-01 sort:stars` | 多限定符叠加 |
+
+**作者搜索**(`github_search_users`):
+
+| 场景 | `q` 示例 | 说明 |
+|---|---|---|
+| 按名字 | `cxvisionai` | login / fullname 匹配 |
+| 找组织 | `cv type:org` | 只搜 Organization |
+| 找个人 | `cv type:user` | 只搜 User |
+| 按粉丝 | `cv followers:>100` | 粉丝数下限 |
+| 按地区 | `cv location:China` | 按 profile location |
+| 按语言 | `cv language:C++` | 按 profile 语言 |
+| 按产出 | `cv repos:>50` | 公开仓库数下限 |
+
+**排序方式**:
+
+| `sort` 值 | 仓库 | 用户 |
+|---|---|---|
+| `stars` | ⭐ star 数 | — |
+| `forks` | fork 数 | — |
+| `updated` | 最近更新 | — |
+| `followers` | — | ⭐ 粉丝数 |
+| `repositories` | — | 公开仓库数 |
+| `joined` | — | 注册时间 |
+| 省略 | best-match | best-match |
+
+`order` 取值:`desc`(默认,降序)/ `asc`(升序)。
 
 ## 错误处理
 

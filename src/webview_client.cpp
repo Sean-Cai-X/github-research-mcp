@@ -142,10 +142,34 @@ bool WebViewClient::create_environment() {
     }
 
     ready_ = false;
+
+    // 创建环境选项(用于传递 --proxy-server 等 Chromium 命令行参数)
+    Microsoft::WRL::ComPtr<ICoreWebView2EnvironmentOptions> options_ptr;
+    if (!proxy_url_.empty()) {
+        // Chromium 代理参数:--proxy-server=<url>
+        // 注意:Chromium 不接受 http:// 前缀的 scheme,需要去掉
+        std::string proxy = proxy_url_;
+        const std::string http_prefix = "http://";
+        if (proxy.compare(0, http_prefix.size(), http_prefix) == 0) {
+            proxy = proxy.substr(http_prefix.size());
+        }
+        std::wstring additional_args = L"--proxy-server=" + to_wstring(proxy);
+        std::cerr << "[webview] using proxy: " << proxy_url_ << std::endl;
+
+        // 使用 Microsoft::WRL::Make 创建 CoreWebView2EnvironmentOptions 实例
+        auto opts = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+        if (opts) {
+            opts->put_AdditionalBrowserArguments(additional_args.c_str());
+            options_ptr = opts;
+        } else {
+            std::cerr << "[webview] WARNING: failed to create environment options, proxy not applied" << std::endl;
+        }
+    }
+
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
         nullptr,                  // 使用系统 Edge Runtime
         user_data_dir.c_str(),    // 用户数据目录
-        nullptr,                  // 默认环境选项
+        options_ptr.Get(),        // 环境选项(含代理设置,可能为 nullptr)
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(result) || !env) {
@@ -161,6 +185,7 @@ bool WebViewClient::create_environment() {
             }
         ).Get()
     );
+    // options_ptr 在超出作用域时自动释放(ComPtr RAII)
     if (FAILED(hr)) {
         std::cerr << "[webview] CreateCoreWebView2EnvironmentWithOptions failed: 0x"
                   << std::hex << hr << std::endl;

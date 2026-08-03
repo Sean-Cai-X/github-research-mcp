@@ -212,11 +212,20 @@ json GitHubClient::get_contributors(const std::string& owner, const std::string&
 }
 
 json GitHubClient::get_recent_commits(const std::string& owner, const std::string& repo,
-                                      int limit, const std::optional<std::string>& since) {
+                                      int limit, const std::optional<std::string>& since,
+                                      const std::optional<std::string>& sha) {
     std::map<std::string, std::string> params;
     params["per_page"] = std::to_string(std::min(limit, 100));
     if (since) params["since"] = *since;
+    if (sha && !sha->empty()) params["sha"] = *sha;  // 分支名 / tag / commit SHA
     return http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) + "/commits", params);
+}
+
+json GitHubClient::get_branches(const std::string& owner, const std::string& repo, int limit) {
+    std::map<std::string, std::string> params;
+    params["per_page"] = std::to_string(std::min(limit, 100));
+    // GET /repos/{owner}/{repo}/branches
+    return http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) + "/branches", params);
 }
 
 json GitHubClient::get_issues(const std::string& owner, const std::string& repo,
@@ -252,28 +261,62 @@ json GitHubClient::search_issues(const std::string& owner, const std::string& re
                     {{"q", q}, {"per_page", std::to_string(std::min(limit, 100))}});
 }
 
+json GitHubClient::search_repositories(const std::string& query,
+                                       const std::string& sort,
+                                       const std::string& order,
+                                       int limit, int page) {
+    std::map<std::string, std::string> params;
+    params["q"] = query;
+    if (!sort.empty()) params["sort"] = sort;
+    if (!order.empty()) params["order"] = order;
+    params["per_page"] = std::to_string(std::min(limit, 100));
+    if (page > 1) params["page"] = std::to_string(page);
+    return http_get("/search/repositories", params);
+}
+
+json GitHubClient::search_users(const std::string& query,
+                                const std::string& sort,
+                                const std::string& order,
+                                int limit, int page) {
+    std::map<std::string, std::string> params;
+    params["q"] = query;
+    if (!sort.empty()) params["sort"] = sort;
+    if (!order.empty()) params["order"] = order;
+    params["per_page"] = std::to_string(std::min(limit, 100));
+    if (page > 1) params["page"] = std::to_string(page);
+    return http_get("/search/users", params);
+}
+
 // === summarize_repo ===
 
 json GitHubClient::summarize_repo(const std::string& owner, const std::string& repo) {
     json info = get_repo_info(owner, repo);
 
+    // 辅助:取 key 对应的 json 值,不存在则返回 json::value_t::null
+    // 避免 info.value(key, nullptr) 在 key 存在且值为 string 时
+    // 触发 nlohmann/json type_error.302(get<std::nullptr_t>() 失败)
+    auto get_or_null = [](const json& obj, const char* key) -> json {
+        if (obj.contains(key)) return obj[key];
+        return json(nullptr);
+    };
+
     json summary = json::object();
-    summary["name"] = info.value("full_name", nullptr);
-    summary["description"] = info.value("description", nullptr);
-    summary["url"] = info.value("html_url", nullptr);
+    summary["name"] = get_or_null(info, "full_name");
+    summary["description"] = get_or_null(info, "description");
+    summary["url"] = get_or_null(info, "html_url");
     summary["stars"] = info.value("stargazers_count", 0);
     summary["forks"] = info.value("forks_count", 0);
     summary["open_issues"] = info.value("open_issues_count", 0);
-    summary["language"] = info.value("language", nullptr);
+    summary["language"] = get_or_null(info, "language");
     if (info.contains("license") && info["license"].is_object()) {
-        summary["license"] = info["license"].value("spdx_id", nullptr);
+        summary["license"] = get_or_null(info["license"], "spdx_id");
     } else {
         summary["license"] = nullptr;
     }
-    summary["created_at"] = info.value("created_at", nullptr);
-    summary["updated_at"] = info.value("updated_at", nullptr);
-    summary["pushed_at"] = info.value("pushed_at", nullptr);
-    summary["default_branch"] = info.value("default_branch", nullptr);
+    summary["created_at"] = get_or_null(info, "created_at");
+    summary["updated_at"] = get_or_null(info, "updated_at");
+    summary["pushed_at"] = get_or_null(info, "pushed_at");
+    summary["default_branch"] = get_or_null(info, "default_branch");
     if (info.contains("topics") && info["topics"].is_array()) {
         summary["topics"] = info["topics"];
     } else {
@@ -303,9 +346,9 @@ json GitHubClient::summarize_repo(const std::string& owner, const std::string& r
         if (releases.is_array() && !releases.empty()) {
             json r = releases[0];
             summary["latest_release"] = {
-                {"tag", r.value("tag_name", nullptr)},
-                {"name", r.value("name", nullptr)},
-                {"date", r.value("published_at", nullptr)}
+                {"tag", get_or_null(r, "tag_name")},
+                {"name", get_or_null(r, "name")},
+                {"date", get_or_null(r, "published_at")}
             };
         } else {
             summary["latest_release"] = nullptr;
