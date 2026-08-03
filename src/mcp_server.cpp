@@ -5,6 +5,9 @@
 #include <iostream>
 #include <string>
 #include <sstream>
+#include <fstream>
+#include <vector>
+#include <cstdlib>
 #include <atomic>
 
 namespace github_research {
@@ -124,18 +127,83 @@ std::string McpServer::handle_request(const json& request) {
 }
 
 json McpServer::handle_initialize(const json& params) {
+    // 通过 instructions 字段把 system_prompt.md 注入 LLM 上下文
+    // MCP 协议规定:initialize result.instructions 会被客户端作为 system prompt 使用
+    // 这是让 LLM 知道"必须先调 github_get_branches 再按分支取提交"的唯一可靠途径
+    // 因为 server 本身没有机会主动向 LLM 发送消息,只能在握手时一次性提供
+    std::string instructions;
+    const char* prompt_paths[] = {
+        // 1. 环境变量显式指定(最高优先级)
+        nullptr
+    };
+    const char* env_path = std::getenv("GITHUB_RESEARCH_SYSTEM_PROMPT");
+    std::string env_path_str;
+    if (env_path && env_path[0] != '\0') {
+        env_path_str = env_path;
+        prompt_paths[0] = env_path_str.c_str();
+    }
+
+    // 候选路径列表(exe 同级 / exe 父目录 / 当前工作目录)
+    std::vector<std::string> candidates;
+    if (prompt_paths[0]) candidates.push_back(prompt_paths[0]);
+
+    // exe 同级目录
+    wchar_t exe_path_w[MAX_PATH] = {0};
+    GetModuleFileNameW(nullptr, exe_path_w, MAX_PATH);
+    std::wstring exe_dir_w(exe_path_w);
+    size_t last_sep = exe_dir_w.find_last_of(L"\\/");
+    if (last_sep != std::wstring::npos) exe_dir_w = exe_dir_w.substr(0, last_sep);
+    std::string exe_dir(exe_dir_w.begin(), exe_dir_w.end());
+    candidates.push_back(exe_dir + "\\system_prompt.md");
+
+    // exe 父目录(开发构建时 build\Release\.. = 项目根)
+    size_t parent_sep = exe_dir.find_last_of("\\/");
+    if (parent_sep != std::string::npos) {
+        std::string parent_dir = exe_dir.substr(0, parent_sep);
+        candidates.push_back(parent_dir + "\\system_prompt.md");
+    }
+
+    // 当前工作目录
+    candidates.push_back("system_prompt.md");
+
+    for (const auto& path : candidates) {
+        std::ifstream ifs(path);
+        if (ifs.is_open()) {
+            std::stringstream ss;
+            ss << ifs.rdbuf();
+            instructions = ss.str();
+            std::cerr << "[mcp] loaded system_prompt from: " << path
+                      << " (" << instructions.size() << " bytes)" << std::endl;
+            break;
+        }
+    }
+
+    if (instructions.empty()) {
+        // 没找到文件也不能让 LLM 裸跑,给一个最小提示
+        instructions = "You are a GitHub deep research assistant. "
+                       "CRITICAL: Always call github_get_branches before github_get_commits, "
+                       "then call github_get_commits per-branch with branch=<name> parameter. "
+                       "Default branch commits may be stale; active development is often on "
+                       "non-default branches (e.g. codex/cxcore-integration).";
+        std::cerr << "[mcp] WARNING: system_prompt.md not found, using minimal fallback" << std::endl;
+    }
+
     return {
         {"protocolVersion", "2024-11-05"},
-        {"capabilities", json::object({{"tools", json::object()}})},
+        {"capabilities", json::object({
+            {"tools", json::object()},
+            {"logging", json::object()}
+        })},
         {"serverInfo", {
             {"name", "github-research-mcp"},
-            {"version", "0.1.0"}
-        }}
+            {"version", "0.2.0"}
+        }},
+        {"instructions", instructions}
     };
 }
 
 json McpServer::handle_tools_list() {
-    // 10 个 tool 的 schema,严格对齐规范
+    // 13 个 tool 的 schema,严格对齐规范
     return {
         {"tools", json::array({
             {
