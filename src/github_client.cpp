@@ -10,7 +10,8 @@ namespace github_research {
 // === 构造 ===
 
 GitHubClient::GitHubClient(std::optional<std::string> token, int timeout_seconds)
-    : http_client_("Deep-Research-Bot/1.0", timeout_seconds, true) {
+    : http_client_("Deep-Research-Bot/1.0", timeout_seconds, true),
+      timeout_seconds_(timeout_seconds) {
     headers_["Accept"] = "application/vnd.github.v3+json";
     headers_["User-Agent"] = "Deep-Research-Bot/1.0";
     if (token && !token->empty()) {
@@ -40,44 +41,60 @@ json GitHubClient::http_get(const std::string& endpoint,
         hdrs["Accept"] = *accept;
     }
 
-    // 首次请求时延迟初始化 WebView2
+    // 首次请求时延迟初始化 HTTP 后端(WebView2 优先,失败 fallback WinHTTP)
     if (!ensure_ready()) {
-        throw GitHubAPIError("WebView2 initialization failed (Edge Runtime missing?)",
+        throw GitHubAPIError("HTTP backend initialization failed (both WebView2 and WinHTTP unavailable)",
                              0, url, "");
     }
 
-    HttpResponse resp = http_client_.get(url, hdrs);
+    int status_code = 0;
+    std::string body;
+    std::map<std::string, std::string> resp_headers;
+
+    if (use_winhttp_fallback_) {
+        // WinHTTP 后端
+        WinHttpResponse resp = winhttp_client_->get(url, hdrs);
+        status_code = resp.status_code;
+        body = resp.body;
+        resp_headers = resp.headers;
+    } else {
+        // WebView2 后端
+        HttpResponse resp = http_client_.get(url, hdrs);
+        status_code = resp.status_code;
+        body = resp.body;
+        resp_headers = resp.headers;
+    }
 
     // 网络层错误(status_code == 0)
-    if (resp.status_code == 0) {
-        throw GitHubAPIError(resp.body, 0, url, "");
+    if (status_code == 0) {
+        throw GitHubAPIError(body, 0, url, "");
     }
 
     // 限流检查:403/429 + X-RateLimit-Remaining: 0
-    if (resp.status_code == 403 || resp.status_code == 429) {
-        auto it = resp.headers.find("x-ratelimit-remaining");
-        if (it != resp.headers.end() && it->second == "0") {
-            auto reset_it = resp.headers.find("x-ratelimit-reset");
-            std::string reset_at = (reset_it != resp.headers.end()) ? reset_it->second : "";
+    if (status_code == 403 || status_code == 429) {
+        auto it = resp_headers.find("x-ratelimit-remaining");
+        if (it != resp_headers.end() && it->second == "0") {
+            auto reset_it = resp_headers.find("x-ratelimit-reset");
+            std::string reset_at = (reset_it != resp_headers.end()) ? reset_it->second : "";
             throw GitHubRateLimitError("rate limit exceeded", reset_at);
         }
     }
 
     // HTTP 错误
-    if (resp.status_code >= 400) {
-        std::string body_preview = resp.body.substr(0, std::min<size_t>(resp.body.size(), 500));
-        std::string msg = "HTTP " + std::to_string(resp.status_code);
-        if (resp.status_code == 404) msg = "repository not found";
-        throw GitHubAPIError(msg, resp.status_code, url, body_preview);
+    if (status_code >= 400) {
+        std::string body_preview = body.substr(0, std::min<size_t>(body.size(), 500));
+        std::string msg = "HTTP " + std::to_string(status_code);
+        if (status_code == 404) msg = "repository not found";
+        throw GitHubAPIError(msg, status_code, url, body_preview);
     }
 
     // 解析 JSON
     try {
-        return json::parse(resp.body);
+        return json::parse(body);
     } catch (const std::exception& e) {
         throw GitHubAPIError(std::string("invalid JSON: ") + e.what(),
-                             resp.status_code, url,
-                             resp.body.substr(0, std::min<size_t>(resp.body.size(), 500)));
+                             status_code, url,
+                             body.substr(0, std::min<size_t>(body.size(), 500)));
     }
 }
 
@@ -91,35 +108,49 @@ std::string GitHubClient::http_get_text(const std::string& endpoint,
         hdrs["Accept"] = *accept;
     }
 
-    // 首次请求时延迟初始化 WebView2
+    // 首次请求时延迟初始化 HTTP 后端
     if (!ensure_ready()) {
-        throw GitHubAPIError("WebView2 initialization failed (Edge Runtime missing?)",
+        throw GitHubAPIError("HTTP backend initialization failed",
                              0, url, "");
     }
 
-    HttpResponse resp = http_client_.get(url, hdrs);
+    int status_code = 0;
+    std::string body;
+    std::map<std::string, std::string> resp_headers;
 
-    if (resp.status_code == 0) {
-        throw GitHubAPIError(resp.body, 0, url, "");
+    if (use_winhttp_fallback_) {
+        WinHttpResponse resp = winhttp_client_->get(url, hdrs);
+        status_code = resp.status_code;
+        body = resp.body;
+        resp_headers = resp.headers;
+    } else {
+        HttpResponse resp = http_client_.get(url, hdrs);
+        status_code = resp.status_code;
+        body = resp.body;
+        resp_headers = resp.headers;
     }
 
-    if (resp.status_code == 403 || resp.status_code == 429) {
-        auto it = resp.headers.find("x-ratelimit-remaining");
-        if (it != resp.headers.end() && it->second == "0") {
-            auto reset_it = resp.headers.find("x-ratelimit-reset");
-            std::string reset_at = (reset_it != resp.headers.end()) ? reset_it->second : "";
+    if (status_code == 0) {
+        throw GitHubAPIError(body, 0, url, "");
+    }
+
+    if (status_code == 403 || status_code == 429) {
+        auto it = resp_headers.find("x-ratelimit-remaining");
+        if (it != resp_headers.end() && it->second == "0") {
+            auto reset_it = resp_headers.find("x-ratelimit-reset");
+            std::string reset_at = (reset_it != resp_headers.end()) ? reset_it->second : "";
             throw GitHubRateLimitError("rate limit exceeded", reset_at);
         }
     }
 
-    if (resp.status_code >= 400) {
-        std::string body_preview = resp.body.substr(0, std::min<size_t>(resp.body.size(), 500));
-        std::string msg = "HTTP " + std::to_string(resp.status_code);
-        if (resp.status_code == 404) msg = "not found";
-        throw GitHubAPIError(msg, resp.status_code, url, body_preview);
+    if (status_code >= 400) {
+        std::string body_preview = body.substr(0, std::min<size_t>(body.size(), 500));
+        std::string msg = "HTTP " + std::to_string(status_code);
+        if (status_code == 404) msg = "not found";
+        throw GitHubAPIError(msg, status_code, url, body_preview);
     }
 
-    return resp.body;
+    return body;
 }
 
 // === 10 个 API 方法 ===

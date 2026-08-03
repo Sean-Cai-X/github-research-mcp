@@ -3,8 +3,11 @@
 #include <string>
 #include <optional>
 #include <map>
+#include <memory>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include "webview_client.hpp"
+#include "winhttp_client.hpp"
 #include "errors.hpp"
 
 namespace github_research {
@@ -75,11 +78,31 @@ public:
     // WebView2 是否就绪
     bool is_ready() const { return http_client_.is_ready(); }
 
-    // 首次请求前确保 WebView2 已初始化
-    // 返回 false 表示初始化失败(Edge Runtime 缺失等)
+    // 当前使用的后端名称("webview2" 或 "winhttp")
+    std::string backend_name() const {
+        return use_winhttp_fallback_ ? "winhttp" : "webview2";
+    }
+
+    // 首次请求前确保 HTTP 后端已就绪
+    // 优先尝试 WebView2,失败则自动 fallback 到 WinHTTP
+    // 返回 false 表示两个后端都不可用(极少见)
     bool ensure_ready() {
+        if (use_winhttp_fallback_) return true;  // WinHTTP 无需初始化
         if (http_client_.is_ready()) return true;
-        return http_client_.initialize();
+
+        std::cerr << "[github] initializing WebView2 backend..." << std::endl;
+        if (http_client_.initialize()) {
+            std::cerr << "[github] WebView2 backend ready" << std::endl;
+            return true;
+        }
+
+        // WebView2 失败,fallback 到 WinHTTP
+        std::cerr << "[github] WARNING: WebView2 init failed, falling back to WinHTTP" << std::endl;
+        std::cerr << "[github] NOTE: WinHTTP lacks browser fingerprint, anti-scraping weaker" << std::endl;
+        use_winhttp_fallback_ = true;
+        winhttp_client_ = std::make_unique<WinHttpClient>(
+            "Deep-Research-Bot/1.0", timeout_seconds_, true);
+        return true;
     }
 
 private:
@@ -101,6 +124,9 @@ private:
                                  const std::map<std::string, std::string>& params = {});
 
     WebViewClient http_client_;
+    std::unique_ptr<WinHttpClient> winhttp_client_;
+    bool use_winhttp_fallback_ = false;
+    int timeout_seconds_ = 30;
     std::map<std::string, std::string> headers_;
     std::string base_url_ = "https://api.github.com";
 };

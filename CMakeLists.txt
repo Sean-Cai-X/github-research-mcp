@@ -42,6 +42,7 @@ add_executable(github-research-mcp
     src/tools.cpp
     src/github_client.cpp
     src/webview_client.cpp
+    src/winhttp_client.cpp
     src/formatters.cpp
     src/string_utils.cpp
 )

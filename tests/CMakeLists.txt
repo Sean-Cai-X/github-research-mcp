@@ -3,6 +3,7 @@ add_executable(test_smoke
     test_smoke.cpp
     ${CMAKE_SOURCE_DIR}/src/github_client.cpp
     ${CMAKE_SOURCE_DIR}/src/webview_client.cpp
+    ${CMAKE_SOURCE_DIR}/src/winhttp_client.cpp
     ${CMAKE_SOURCE_DIR}/src/formatters.cpp
     ${CMAKE_SOURCE_DIR}/src/string_utils.cpp
 )

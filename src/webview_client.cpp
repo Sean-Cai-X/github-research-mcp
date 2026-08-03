@@ -2,6 +2,7 @@
 #include "github_research/string_utils.hpp"
 #include <windows.h>
 #include <objbase.h>
+#include <winreg.h>
 #include <wrl.h>
 #include <atomic>
 #include <chrono>
@@ -63,25 +64,82 @@ bool WebViewClient::create_hidden_window() {
 }
 
 bool WebViewClient::create_environment() {
-    // 用户数据目录:优先用 WEBVIEW2_USER_DATA_DIR 环境变量
-    // 否则用 exe 同级目录下的 webview2-data(避免 %LOCALAPPDATA% 沙箱限制)
+    // 用户数据目录选择策略(按优先级):
+    // 1. WEBVIEW2_USER_DATA_DIR 环境变量(用户显式指定)
+    // 2. %LOCALAPPDATA%\github-research-mcp\webview2-data (标准位置,推荐)
+    // 3. %TEMP%\github-research-mcp-webview2 (回退,确保可写)
+    // 4. exe 同级目录\webview2-data (最后回退)
     std::wstring user_data_dir;
     wchar_t env_dir[MAX_PATH];
     DWORD env_len = GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_DIR", env_dir, MAX_PATH);
     if (env_len > 0 && env_len < MAX_PATH) {
         user_data_dir = env_dir;
+        std::cerr << "[webview] using WEBVIEW2_USER_DATA_DIR: ";
+        std::wcerr << user_data_dir << std::endl;
     } else {
-        // 用 exe 所在目录 + \webview2-data
-        wchar_t exe_path[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-        std::wstring exe_dir = exe_path;
-        size_t last_sep = exe_dir.find_last_of(L"\\/");
-        if (last_sep != std::wstring::npos) {
-            exe_dir = exe_dir.substr(0, last_sep);
+        // 尝试 %LOCALAPPDATA%
+        wchar_t local_app[MAX_PATH];
+        DWORD la_len = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app, MAX_PATH);
+        if (la_len > 0 && la_len < MAX_PATH) {
+            user_data_dir = std::wstring(local_app) + L"\\github-research-mcp\\webview2-data";
+        } else {
+            // 回退到 %TEMP%
+            wchar_t temp_dir[MAX_PATH];
+            DWORD t_len = GetEnvironmentVariableW(L"TEMP", temp_dir, MAX_PATH);
+            if (t_len > 0 && t_len < MAX_PATH) {
+                user_data_dir = std::wstring(temp_dir) + L"\\github-research-mcp-webview2";
+            } else {
+                // 最后回退:exe 同级目录
+                wchar_t exe_path[MAX_PATH];
+                GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+                std::wstring exe_dir = exe_path;
+                size_t last_sep = exe_dir.find_last_of(L"\\/");
+                if (last_sep != std::wstring::npos) {
+                    exe_dir = exe_dir.substr(0, last_sep);
+                }
+                user_data_dir = exe_dir + L"\\webview2-data";
+            }
         }
-        user_data_dir = exe_dir + L"\\webview2-data";
     }
-    CreateDirectoryW(user_data_dir.c_str(), nullptr);
+
+    // 创建目录(如果不存在)
+    // 递归创建:先创建父目录,再创建子目录
+    {
+        std::wstring parent = user_data_dir;
+        size_t last_sep = parent.find_last_of(L"\\/");
+        if (last_sep != std::wstring::npos) {
+            parent = parent.substr(0, last_sep);
+            CreateDirectoryW(parent.c_str(), nullptr);
+        }
+    }
+    BOOL dir_created = CreateDirectoryW(user_data_dir.c_str(), nullptr);
+    if (!dir_created) {
+        DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS) {
+            std::cerr << "[webview] WARNING: failed to create user data dir (err=" << err << "): ";
+            std::wcerr << user_data_dir << std::endl;
+        }
+    }
+    std::cerr << "[webview] user data dir: ";
+    std::wcerr << user_data_dir << std::endl;
+
+    // 检查 Edge Runtime 是否安装(诊断信息)
+    HKEY runtime_key;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            0, KEY_READ, &runtime_key) == ERROR_SUCCESS) {
+        wchar_t version[64] = {0};
+        DWORD version_size = sizeof(version);
+        if (RegQueryValueExW(runtime_key, L"pv", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(version), &version_size) == ERROR_SUCCESS) {
+            std::cerr << "[webview] Edge Runtime version: ";
+            std::wcerr << version << std::endl;
+        }
+        RegCloseKey(runtime_key);
+    } else {
+        std::cerr << "[webview] WARNING: WebView2 Runtime NOT FOUND in registry" << std::endl;
+        std::cerr << "[webview] Please install from: https://developer.microsoft.com/microsoft-edge/webview2/" << std::endl;
+    }
 
     ready_ = false;
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
