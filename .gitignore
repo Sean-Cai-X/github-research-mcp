@@ -1,0 +1,45 @@
+# Build output
+build/
+build*/
+out/
+bin/
+lib/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln.docstates
+*.vcxproj.filters
+*.vcxproj.user
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# Dependencies (third-party binaries, should be fetched separately)
+third_party/WebView2/redist/
+third_party/WebView2/lib/
+third_party/json/
+# NuGet 包和解压中间产物(用户自行下载)
+third_party/downloads/
+*.nupkg
+*.zip
+
+# Runtime data
+webview2-data/
+*.log
+.env
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
