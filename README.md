@@ -4,11 +4,27 @@ GitHub 深度研究 MCP 服务,基于 WebView2 浏览器链路。
 
 ## 特性
 
-- **10 个 GitHub 工具**:repo_info / readme / tree / languages / contributors / commits / issues / pull_requests / releases / summarize_repo
+- **13 个 GitHub 工具**:repo_info / readme / tree / languages / contributors / commits / branches / issues / pull_requests / releases / summarize_repo / search_repositories / search_users
 - **WebView2 浏览器链路**:Chromium 内核,完整浏览器指纹(TLS JA3 / HTTP/2 / Headers 顺序),反爬能力强
-- **自动系统代理**:继承 Edge/系统代理设置
-- **MCP over stdio**:JSON-RPC 2.0,兼容 Claude Desktop / TRAE / Cursor
+- **分支枚举与按分支查询**:`github_get_branches` + `github_get_commits(branch=...)`,不再遗漏 codex/integration 等开发分支
+- **搜索与发现**:`github_search_repositories`(trending / 按星标 / 按话题)+ `github_search_users`(按作者 / 组织)
+- **自动系统代理 + 显式 `--proxy`**:支持 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 环境变量
+- **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
 - **零运行时依赖**:静态链接 CRT,单 exe + WebView2Loader.dll
+
+## 截图示意
+
+### 分支提交分析(区分 master 与 codex/cxcore-integration 时间线)
+
+![Branch Analysis](assets/screenshots/branch_analysis.jpg)
+
+LLM 按新工作流自动调用 `github_get_branches` 枚举仓库全部分支,对活跃分支(codex/cxcore-integration)单独调用 `github_get_commits(branch=...)`,在报告中区分两条完全不同的时间线:master 停留在 2022-08-24,而 codex 分支活跃至 2026-08-02。
+
+### 热点项目搜索与分析
+
+![Hot Repos](assets/screenshots/hot_repos.jpg)
+
+LLM 按 Round 0 Discovery 工作流调用 `github_search_repositories(q="stars:>1000 pushed:>2026-07-01", sort=stars)`,返回近期高星活跃项目列表,并生成结构化分析表(项目名 / 简介 / 热门领域 / 核心价值)。
 
 ## 环境要求
 
