@@ -355,7 +355,7 @@ json McpServer::handle_tools_list() {
             },
             {
                 {"name", "github_search_repositories"},
-                {"description", "Search repositories by project name, topic, language, stars, etc. Use for discovery (e.g. find popular C++ vision libraries)."},
+                {"description", "GitHub trending / discovery API. Use this when user asks for 'hot projects', 'trending repos', 'popular X', or gives a topic/language without a specific owner/repo. Query examples: 'stars:>1000 pushed:>2026-07-01' (recent hot), 'language:C++ stars:>500' (popular C++), 'topic:computer-vision' (by topic). Always use this instead of saying 'no trending API'."},
                 {"inputSchema", json::object({
                     {"type", "object"},
                     {"properties", json::object({
@@ -391,7 +391,7 @@ json McpServer::handle_tools_list() {
             },
             {
                 {"name", "github_search_users"},
-                {"description", "Search GitHub users/orgs by name, location, language, followers, etc. Use to discover authors or organizations matching a research topic."},
+                {"description", "Find GitHub authors/orgs by name, location, language, followers. Use when user asks 'who is working on X', 'find orgs in field Y', or mentions an author name. Query examples: 'type:org followers:>100' (top orgs), 'language:C++ location:China' (Chinese C++ devs), 'cxvisionai' (by name)."},
                 {"inputSchema", json::object({
                     {"type", "object"},
                     {"properties", json::object({

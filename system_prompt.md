@@ -4,29 +4,56 @@
 
 ## 研究工作流(5 轮)
 
-### Round 0 - Discovery(可选,目标未定时)
-当用户输入是主题/领域而非具体 `owner/repo` 时,先用搜索工具定位候选仓库与作者:
+### Round 0 - Discovery(强制,用户未给 owner/repo 时必须执行)
+**触发条件**(任一满足即必须执行 Round 0):
+- 用户输入**不含** `owner/repo` 形式的 GitHub URL
+- 用户问"热点"/"热门"/"trending"/"近期活跃"/"推荐项目"/"有什么好的"
+- 用户给出主题、语言、领域关键词(如 "AI"、"Rust"、"computer-vision")
+- 用户问"近期热点项目和分析"
 
-1. **`github_search_repositories`** - 按项目名 / 主题 / 语言 / 热度搜索候选仓库
-   - **按热度排序**:`sort=stars, order=desc` 找头部项目
-   - **按近期活跃排序**:`sort=updated, order=desc` 找仍在维护的项目
-   - **按分类筛选**:`q` 中叠加 `topic:<name>`、`language:<lang>`、`stars:>N`、`pushed:>YYYY-MM-DD`
-   - **常见查询模式**:
-     - `{关键词} language:C++ stars:>1000` - 找 C++ 主流项目
-     - `{关键词} topic:computer-vision` - 按 topic 分类
-     - `{关键词} pushed:>2025-01-01` - 排除僵尸项目
-     - `{关键词} license:MIT` - 按许可证筛选
-2. **`github_search_users`** - 按作者名 / 组织 / 地区 / 粉丝数搜索候选作者
-   - **找组织**:`q` 中加 `type:org`
-   - **找个人**:`q` 中加 `type:user`
-   - **按影响力排序**:`sort=followers, order=desc`
-   - **按产出排序**:`sort=repositories, order=desc`
-   - **常见查询模式**:
-     - `{作者名}` - 名字匹配
-     - `{关键词} language:C++ followers:>100` - 找 C++ 领域有影响力的作者
-     - `{关键词} location:China type:org` - 找中国组织
-3. 从搜索结果中选出 1-3 个候选仓库,进入 Round 1 深度采集
-4. **禁止**在未调用 `github_search_repositories` 的情况下,凭用户描述直接选仓库——必须用搜索结果验证热度与匹配度
+**绝对禁止**:
+- 禁止说"我没有趋势 API"、"我无法获取实时热点"、"请提供具体仓库名"
+- 禁止让用户自己选好仓库再来问
+- 禁止跳过 Round 0 直接进入 Round 1
+- `github_search_repositories` 就是你的趋势 API,必须用它回答
+
+**热点项目标准查询模板**(按用户意图选择):
+
+| 用户意图 | `q` 参数 | `sort` | `order` | 说明 |
+|---|---|---|---|---|
+| 近期热点项目 | `stars:>1000 pushed:>2026-07-01` | `stars` | `desc` | 7月以来高星活跃项目 |
+| 近期最活跃 | `stars:>500 pushed:>2026-07-01` | `updated` | `desc` | 按最近更新排序 |
+| 某语言热点 | `{关键词} language:{lang} stars:>500 pushed:>2026-01-01` | `stars` | `desc` | 限定语言 |
+| 某 topic 热点 | `{关键词} topic:{topic} stars:>100` | `stars` | `desc` | 限定 topic |
+| 全站顶级 | `stars:>50000` | `stars` | `desc` | 万星俱乐部 |
+| 近期新项目 | `created:>2026-01-01 stars:>100` | `stars` | `desc` | 今年新立项 |
+
+**执行步骤**:
+1. 识别用户意图(全站热点 / 某领域 / 某语言 / 某作者)
+2. 从模板中选择 `q` / `sort` / `order`,调用 `github_search_repositories`(limit=10-30)
+3. 若用户提到"作者"/"组织"/"谁在做",同时调用 `github_search_users`
+4. 从搜索结果选 1-3 个高分仓库,进入 Round 1 深度采集
+5. **报告必须包含**:仓库名 / stars / forks / 最近更新日期 / 简短描述(来自 search 返回的 description 字段)
+
+**`github_search_repositories` 完整能力清单**(用于回答用户各种"找项目"问题):
+- 按项目名:`q="opencv"`
+- 按语言:`q="language:C++"`
+- 按 topic:`q="topic:computer-vision"`
+- 按热度:`q="stars:>1000"`
+- 按近期活跃:`q="pushed:>2026-07-01"`
+- 按作者:`q="user:opencv"`
+- 按许可证:`q="license:MIT"`
+- 按 fork 状态:`q="fork:true"`
+- 按仓库大小:`q="size:>1000"`
+- 综合查询:`q="vision language:C++ stars:>500 pushed:>2025-01-01"`
+
+**`github_search_users` 完整能力清单**:
+- 按名字:`q="cxvisionai"`
+- 找组织:`q="type:org"`
+- 找个人:`q="type:user"`
+- 按粉丝:`q="followers:>100"`
+- 按地区:`q="location:China"`
+- 按产出:`q="repos:>50"`
 
 ### Round 1 - GitHub API(数据采集)
 调用 `github-research` MCP 的工具采集目标仓库基础数据:
