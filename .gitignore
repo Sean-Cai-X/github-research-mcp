@@ -31,6 +31,7 @@ third_party/downloads/
 
 # Runtime data
 webview2-data/
+profiles/
 *.log
 .env
 

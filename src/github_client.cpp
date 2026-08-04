@@ -41,9 +41,9 @@ json GitHubClient::http_get(const std::string& endpoint,
         hdrs["Accept"] = *accept;
     }
 
-    // 首次请求时延迟初始化 HTTP 后端(WebView2 优先,失败 fallback WinHTTP)
+    // 首次请求时延迟初始化 WebView2 后端(单一技术栈,无 fallback)
     if (!ensure_ready()) {
-        throw GitHubAPIError("HTTP backend initialization failed (both WebView2 and WinHTTP unavailable)",
+        throw GitHubAPIError("WebView2 backend initialization failed (no fallback, single tech stack)",
                              0, url, "");
     }
 
@@ -51,19 +51,11 @@ json GitHubClient::http_get(const std::string& endpoint,
     std::string body;
     std::map<std::string, std::string> resp_headers;
 
-    if (use_winhttp_fallback_) {
-        // WinHTTP 后端
-        WinHttpResponse resp = winhttp_client_->get(url, hdrs);
-        status_code = resp.status_code;
-        body = resp.body;
-        resp_headers = resp.headers;
-    } else {
-        // WebView2 后端
-        HttpResponse resp = http_client_.get(url, hdrs);
-        status_code = resp.status_code;
-        body = resp.body;
-        resp_headers = resp.headers;
-    }
+    // WebView2 后端(唯一网络层)
+    HttpResponse resp = http_client_.get(url, hdrs);
+    status_code = resp.status_code;
+    body = resp.body;
+    resp_headers = resp.headers;
 
     // 网络层错误(status_code == 0)
     if (status_code == 0) {
@@ -108,9 +100,9 @@ std::string GitHubClient::http_get_text(const std::string& endpoint,
         hdrs["Accept"] = *accept;
     }
 
-    // 首次请求时延迟初始化 HTTP 后端
+    // 首次请求时延迟初始化 WebView2 后端
     if (!ensure_ready()) {
-        throw GitHubAPIError("HTTP backend initialization failed",
+        throw GitHubAPIError("WebView2 backend initialization failed",
                              0, url, "");
     }
 
@@ -118,17 +110,11 @@ std::string GitHubClient::http_get_text(const std::string& endpoint,
     std::string body;
     std::map<std::string, std::string> resp_headers;
 
-    if (use_winhttp_fallback_) {
-        WinHttpResponse resp = winhttp_client_->get(url, hdrs);
-        status_code = resp.status_code;
-        body = resp.body;
-        resp_headers = resp.headers;
-    } else {
-        HttpResponse resp = http_client_.get(url, hdrs);
-        status_code = resp.status_code;
-        body = resp.body;
-        resp_headers = resp.headers;
-    }
+    // WebView2 后端(唯一网络层)
+    HttpResponse resp = http_client_.get(url, hdrs);
+    status_code = resp.status_code;
+    body = resp.body;
+    resp_headers = resp.headers;
 
     if (status_code == 0) {
         throw GitHubAPIError(body, 0, url, "");

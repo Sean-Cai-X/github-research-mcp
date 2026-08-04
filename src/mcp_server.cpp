@@ -2,6 +2,14 @@
 #include "github_research/string_utils.hpp"
 #include "github_research/errors.hpp"
 #include "github_research/http_server.hpp"
+#include "github_research/arxiv_tools.hpp"
+#include "github_research/hackernews_tools.hpp"
+#include "github_research/package_tools.hpp"
+#include "github_research/paperswithcode_tools.hpp"
+#include "github_research/huggingface_tools.hpp"
+#include "github_research/semanticscholar_tools.hpp"
+#include "github_research/stackoverflow_tools.hpp"
+#include "github_research/webview_helpers.hpp"
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -9,16 +17,226 @@
 #include <vector>
 #include <cstdlib>
 #include <atomic>
+#include <memory>
 
 namespace github_research {
 
-// tools.cpp 中实现的 tool 分发函数
+// tools.cpp 中实现的 GitHub 工具分发函数
 json dispatch_tool_call(GitHubClient& client, const json& params);
 
 McpServer::McpServer(std::optional<std::string> token, int timeout_seconds)
     : client_(token, timeout_seconds) {}
 
-McpServer::~McpServer() {}
+McpServer::~McpServer() {
+    shutdown_arxiv();
+    shutdown_hackernews();
+    shutdown_package();
+    shutdown_paperswithcode();
+    shutdown_huggingface();
+    shutdown_semanticscholar();
+    shutdown_stackoverflow();
+}
+
+void McpServer::set_proxy(const std::string& proxy_url) {
+    proxy_url_ = proxy_url;
+    client_.set_proxy(proxy_url);
+}
+
+// ============ 通用 init/shutdown 辅助 ============
+bool McpServer::init_session(std::unique_ptr<WebViewSession>& session,
+                              const std::wstring& userDataDir,
+                              const std::string& proxy_url,
+                              const char* logName) {
+    if (session) return true;  // 已初始化
+    std::string effective_proxy = proxy_url.empty() ? proxy_url_ : proxy_url;
+
+    session = std::make_unique<WebViewSession>();
+    HRESULT hr = session->Init(userDataDir, L"", effective_proxy);
+    if (FAILED(hr)) {
+        std::cerr << "[mcp] " << logName << " session init failed: 0x"
+                  << std::hex << hr << std::endl;
+        session.reset();
+        return false;
+    }
+    log(std::string(logName) + " session ready");
+    return true;
+}
+
+void McpServer::shutdown_session(std::unique_ptr<WebViewSession>& session,
+                                  const char* logName) {
+    if (session) {
+        log(std::string("shutting down ") + logName + " session");
+        session->Destroy();
+        session.reset();
+    }
+}
+
+// ============ 各源 init/shutdown ============
+bool McpServer::init_arxiv(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(arxiv_session_, userDataDir, proxy_url, "arXiv");
+}
+void McpServer::shutdown_arxiv() { shutdown_session(arxiv_session_, "arXiv"); }
+
+bool McpServer::init_hackernews(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(hn_session_, userDataDir, proxy_url, "HackerNews");
+}
+void McpServer::shutdown_hackernews() { shutdown_session(hn_session_, "HackerNews"); }
+
+bool McpServer::init_package(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(pkg_session_, userDataDir, proxy_url, "Package");
+}
+void McpServer::shutdown_package() { shutdown_session(pkg_session_, "Package"); }
+
+bool McpServer::init_paperswithcode(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(pwc_session_, userDataDir, proxy_url, "PapersWithCode");
+}
+void McpServer::shutdown_paperswithcode() { shutdown_session(pwc_session_, "PapersWithCode"); }
+
+bool McpServer::init_huggingface(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(hf_session_, userDataDir, proxy_url, "HuggingFace");
+}
+void McpServer::shutdown_huggingface() { shutdown_session(hf_session_, "HuggingFace"); }
+
+bool McpServer::init_semanticscholar(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(s2_session_, userDataDir, proxy_url, "SemanticScholar");
+}
+void McpServer::shutdown_semanticscholar() { shutdown_session(s2_session_, "SemanticScholar"); }
+
+bool McpServer::init_stackoverflow(const std::wstring& userDataDir, const std::string& proxy_url) {
+    return init_session(so_session_, userDataDir, proxy_url, "StackOverflow");
+}
+void McpServer::shutdown_stackoverflow() { shutdown_session(so_session_, "StackOverflow"); }
+
+// ============ arXiv 工具分发(4 个工具) ============
+json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& args) {
+    // arxiv_get_pdf_link 是纯 ID 规则拼接,零网络请求,允许在无会话时使用
+    if (tool_name == "arxiv_get_pdf_link") {
+        try {
+            return ToolArxivGetPdfLink(args);
+        } catch (const std::exception& e) {
+            return {
+                {"content", json::array({{{"type", "text"}, {"text", std::string("ERROR: arxiv_get_pdf_link exception: ") + e.what()}}})},
+                {"isError", true}
+            };
+        }
+    }
+    // 其余 3 个工具(搜索/详情/连通性检测)需要浏览器会话
+    if (!arxiv_session_) {
+        return {
+            {"content", json::array({{{"type", "text"}, {"text", "ERROR: arXiv session not initialized. Start server with --arxiv-profile <DIR>."}}})},
+            {"isError", true}
+        };
+    }
+    try {
+        if (tool_name == "arxiv_search_papers")
+            return ToolArxivSearchPapers(*arxiv_session_, args);
+        if (tool_name == "arxiv_get_paper_detail")
+            return ToolArxivGetPaperDetail(*arxiv_session_, args);
+        if (tool_name == "arxiv_check_available")
+            return ToolArxivCheckAvailable(*arxiv_session_, args);
+    } catch (const std::exception& e) {
+        return {
+            {"content", json::array({{{"type", "text"}, {"text", std::string("ERROR: arxiv tool exception: ") + e.what()}}})},
+            {"isError", true}
+        };
+    }
+    return {
+        {"content", json::array({{{"type", "text"}, {"text", "ERROR: unknown arxiv tool: " + tool_name}}})},
+        {"isError", true}
+    };
+}
+
+// ============ Hacker News 工具分发(5 个 hn_* 工具) ============
+json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args) {
+    if (!hn_session_) return McpError("ERROR: HackerNews session not initialized. Start with --hn-profile <DIR>.");
+    try {
+        if (tool_name == "hn_get_top_stories")    return ToolHnGetTopStories(*hn_session_, args);
+        if (tool_name == "hn_get_new_stories")    return ToolHnGetNewStories(*hn_session_, args);
+        if (tool_name == "hn_get_best_stories")   return ToolHnGetBestStories(*hn_session_, args);
+        if (tool_name == "hn_get_item")           return ToolHnGetItem(*hn_session_, args);
+        if (tool_name == "hn_search_by_keyword")  return ToolHnSearchByKeyword(*hn_session_, args);
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: hn tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown hn tool: " + tool_name);
+}
+
+// ============ Package Registry 工具分发(4 个 pkg_* 工具) ============
+json McpServer::dispatch_pkg_tool(const std::string& tool_name, const json& args) {
+    if (!pkg_session_) return McpError("ERROR: Package session not initialized. Start with --pkg-profile <DIR>.");
+    try {
+        if (tool_name == "pkg_search_npm")      return ToolPkgSearchNpm(*pkg_session_, args);
+        if (tool_name == "pkg_get_npm_detail")   return ToolPkgGetNpmDetail(*pkg_session_, args);
+        if (tool_name == "pkg_search_pypi")     return ToolPkgSearchPypi(*pkg_session_, args);
+        if (tool_name == "pkg_get_pypi_detail")  return ToolPkgGetPypiDetail(*pkg_session_, args);
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: pkg tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown pkg tool: " + tool_name);
+}
+
+// ============ Papers with Code 工具分发(5 个 pwc_* 工具) ============
+json McpServer::dispatch_pwc_tool(const std::string& tool_name, const json& args) {
+    if (!pwc_session_) return McpError("ERROR: PapersWithCode session not initialized. Start with --pwc-profile <DIR>.");
+    try {
+        if (tool_name == "pwc_search_papers")    return ToolPwcSearchPapers(*pwc_session_, args);
+        if (tool_name == "pwc_get_paper_detail") return ToolPwcGetPaperDetail(*pwc_session_, args);
+        if (tool_name == "pwc_get_sota")         return ToolPwcGetSota(*pwc_session_, args);
+        if (tool_name == "pwc_search_tasks")    return ToolPwcSearchTasks(*pwc_session_, args);
+        if (tool_name == "pwc_search_datasets")  return ToolPwcSearchDatasets(*pwc_session_, args);
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: pwc tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown pwc tool: " + tool_name);
+}
+
+// ============ Hugging Face 工具分发(7 个 hf_* 工具) ============
+json McpServer::dispatch_hf_tool(const std::string& tool_name, const json& args) {
+    if (!hf_session_) return McpError("ERROR: HuggingFace session not initialized. Start with --hf-profile <DIR>.");
+    try {
+        if (tool_name == "hf_search_models")    return ToolHfSearchModels(*hf_session_, args);
+        if (tool_name == "hf_get_model_info")   return ToolHfGetModelInfo(*hf_session_, args);
+        if (tool_name == "hf_get_model_readme") return ToolHfGetModelReadme(*hf_session_, args);
+        if (tool_name == "hf_search_datasets")  return ToolHfSearchDatasets(*hf_session_, args);
+        if (tool_name == "hf_get_dataset_info") return ToolHfGetDatasetInfo(*hf_session_, args);
+        if (tool_name == "hf_get_trending_models") return ToolHfGetTrendingModels(*hf_session_, args);
+        if (tool_name == "hf_search_spaces")    return ToolHfSearchSpaces(*hf_session_, args);
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: hf tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown hf tool: " + tool_name);
+}
+
+// ============ Semantic Scholar 工具分发(6 个 s2_* 工具) ============
+json McpServer::dispatch_s2_tool(const std::string& tool_name, const json& args) {
+    if (!s2_session_) return McpError("ERROR: SemanticScholar session not initialized. Start with --s2-profile <DIR>.");
+    try {
+        if (tool_name == "s2_search_papers")     return ToolS2SearchPapers(*s2_session_, args);
+        if (tool_name == "s2_get_paper_detail")   return ToolS2GetPaperDetail(*s2_session_, args);
+        if (tool_name == "s2_get_citations")     return ToolS2GetCitations(*s2_session_, args);
+        if (tool_name == "s2_get_references")     return ToolS2GetReferences(*s2_session_, args);
+        if (tool_name == "s2_get_author_papers")  return ToolS2GetAuthorPapers(*s2_session_, args);
+        if (tool_name == "s2_search_author")     return ToolS2SearchAuthor(*s2_session_, args);
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: s2 tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown s2 tool: " + tool_name);
+}
+
+// ============ Stack Overflow 工具分发(5 个 so_* 工具) ============
+json McpServer::dispatch_so_tool(const std::string& tool_name, const json& args) {
+    if (!so_session_) return McpError("ERROR: StackOverflow session not initialized. Start with --so-profile <DIR>.");
+    try {
+        if (tool_name == "so_search_questions")  return ToolSoSearchQuestions(*so_session_, args);
+        if (tool_name == "so_get_question_detail") return ToolSoGetQuestionDetail(*so_session_, args);
+        if (tool_name == "so_get_top_answers")   return ToolSoGetTopAnswers(*so_session_, args);
+        if (tool_name == "so_search_by_tags")    return ToolSoSearchByTags(*so_session_, args);
+        if (tool_name == "so_get_similar")       return ToolSoGetSimilar(*so_session_, args);
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: so tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown so tool: " + tool_name);
+}
 
 bool McpServer::read_line(std::string& line) {
     std::getline(std::cin, line);
@@ -195,7 +413,7 @@ json McpServer::handle_initialize(const json& params) {
             {"logging", json::object()}
         })},
         {"serverInfo", {
-            {"name", "github-research-mcp"},
+            {"name", "research-mcp"},
             {"version", "0.2.0"}
         }},
         {"instructions", instructions}
@@ -424,13 +642,471 @@ json McpServer::handle_tools_list() {
                     })},
                     {"required", json::array({"q"})}
                 })}
+            },
+            // ========== arXiv 工具集(4 个 arxiv_*) ==========
+            {
+                {"name", "arxiv_search_papers"},
+                {"description", "Search papers on arXiv.org. Supports native arXiv search syntax: 'cat:cs.AI' for category, 'abs:keyword' for abstract match, 'au:author_name' for author search, 'ti:title_word' for title match. Example query: 'cat:cs.LG diffusion large model' returns recent ML diffusion papers."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({
+                            {"type", "string"},
+                            {"description", "Search query using arXiv syntax. Supports cat:<category>, au:<author>, abs:<keyword>, ti:<word>, AND/OR operators. e.g. 'cat:cs.CV AND abs:video generation'"}
+                        })},
+                        {"max_results", json::object({
+                            {"type", "integer"},
+                            {"default", 10},
+                            {"minimum", 1},
+                            {"maximum", 50},
+                            {"description", "Max number of results (page default is 25 per request)"}
+                        })}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "arxiv_get_paper_detail"},
+                {"description", "Get full details of an arXiv paper by ID: complete abstract, full author list, subject categories, PDF link, submission history. Use after arxiv_search_papers to read papers of interest."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"arxiv_id", json::object({
+                            {"type", "string"},
+                            {"description", "arXiv paper ID. New format: '2501.01234' or '2501.01234v2'. Old format: 'cs.AI/0309001'"}
+                        })}
+                    })},
+                    {"required", json::array({"arxiv_id"})}
+                })}
+            },
+            {
+                {"name", "arxiv_get_pdf_link"},
+                {"description", "Quickly get the direct PDF download link and abstract page link for an arXiv paper (zero-latency, no web request, ID-rule based)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"arxiv_id", json::object({
+                            {"type", "string"},
+                            {"description", "arXiv paper ID e.g. '2501.01234'"}
+                        })}
+                    })},
+                    {"required", json::array({"arxiv_id"})}
+                })}
+            },
+            {
+                {"name", "arxiv_check_available"},
+                {"description", "Check if arXiv.org website is reachable and loaded correctly (CDN / network connectivity probe). No parameters."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object()},
+                    {"required", json::array()}
+                })}
+            },
+            // ========== Hacker News 工具集(5 个 hn_*) ==========
+            {
+                {"name", "hn_get_top_stories"},
+                {"description", "Get top stories from Hacker News front page with titles, URLs, scores, authors, and comment counts."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",100}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "hn_get_new_stories"},
+                {"description", "Get newest stories from Hacker News."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",100}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "hn_get_best_stories"},
+                {"description", "Get best stories from Hacker News."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",100}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "hn_get_item"},
+                {"description", "Get full detail of a Hacker News post including all comments, by item ID."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"id", json::object({{"type","integer"},{"description","HN item ID"}})}
+                    })},
+                    {"required", json::array({"id"})}
+                })}
+            },
+            {
+                {"name", "hn_search_by_keyword"},
+                {"description", "Search Hacker News stories and comments by keyword via Algolia search."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"},{"description","Search keyword"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            // ========== Package Registry 工具集(4 个 pkg_*) ==========
+            {
+                {"name", "pkg_search_npm"},
+                {"description", "Search npm packages by keyword. Returns package names, descriptions, versions, authors, download counts."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "pkg_get_npm_detail"},
+                {"description", "Get detailed info for an npm package: version, license, dependencies, README preview, weekly downloads."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"name", json::object({{"type","string"},{"description","npm package name"}})}
+                    })},
+                    {"required", json::array({"name"})}
+                })}
+            },
+            {
+                {"name", "pkg_search_pypi"},
+                {"description", "Search PyPI packages by keyword. Returns package names, versions, descriptions."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "pkg_get_pypi_detail"},
+                {"description", "Get detailed info for a PyPI package: version, author, license, dependencies, project URLs."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"name", json::object({{"type","string"},{"description","PyPI package name"}})}
+                    })},
+                    {"required", json::array({"name"})}
+                })}
+            },
+            // ========== Papers with Code 工具集(5 个 pwc_*) ==========
+            {
+                {"name", "pwc_search_papers"},
+                {"description", "Search papers on Papers with Code. Returns titles, authors, abstracts, code repository links if available."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "pwc_get_paper_detail"},
+                {"description", "Get paper detail with official and community code implementations from Papers with Code."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"paper_id", json::object({{"type","string"},{"description","Papers with Code paper ID or slug"}})}
+                    })},
+                    {"required", json::array({"paper_id"})}
+                })}
+            },
+            {
+                {"name", "pwc_get_sota"},
+                {"description", "Get State-of-the-Art (SOTA) leaderboard for a specific task from Papers with Code."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"task", json::object({{"type","string"},{"description","Task name e.g. 'Image Classification'"}})},
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",100}})}
+                    })},
+                    {"required", json::array({"task"})}
+                })}
+            },
+            {
+                {"name", "pwc_search_tasks"},
+                {"description", "Search task categories on Papers with Code."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "pwc_search_datasets"},
+                {"description", "Search datasets on Papers with Code."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            // ========== Hugging Face 工具集(7 个 hf_*) ==========
+            {
+                {"name", "hf_search_models"},
+                {"description", "Search Hugging Face models by keyword and optional task filter. Returns model IDs, downloads, likes, tags."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"task", json::object({{"type","string"},{"description","Filter by task e.g. 'text-classification'"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "hf_get_model_info"},
+                {"description", "Get detailed info for a Hugging Face model: tags, downloads, likes, pipeline tag, framework, last modified."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"model_id", json::object({
+                            {"type", "string"},
+                            {"description", "e.g. bert-base-uncased"}
+                        })}
+                    })},
+                    {"required", json::array({"model_id"})}
+                })}
+            },
+            {
+                {"name", "hf_get_model_readme"},
+                {"description", "Get the full README/model card content for a Hugging Face model (truncated to 5000 chars)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"model_id", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"model_id"})}
+                })}
+            },
+            {
+                {"name", "hf_search_datasets"},
+                {"description", "Search Hugging Face datasets by keyword. Returns dataset IDs, downloads, likes."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "hf_get_dataset_info"},
+                {"description", "Get detailed info for a Hugging Face dataset."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"dataset_id", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"dataset_id"})}
+                })}
+            },
+            {
+                {"name", "hf_get_trending_models"},
+                {"description", "Get trending Hugging Face models sorted by recent popularity."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "hf_search_spaces"},
+                {"description", "Search Hugging Face Spaces (online demos) by keyword."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            // ========== Semantic Scholar 工具集(6 个 s2_*) ==========
+            {
+                {"name", "s2_search_papers"},
+                {"description", "Search papers on Semantic Scholar. Supports year range filter. Returns titles, authors, citation counts, abstracts."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})},
+                        {"year", json::object({{"type","string"},{"description","Year range e.g. 2020-2024"}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "s2_get_paper_detail"},
+                {"description", "Get paper detail from Semantic Scholar: abstract, authors, venue, citation count, fields of study, external IDs."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"paper_id", json::object({{"type","string"},{"description","Semantic Scholar paper ID, DOI, or arXiv ID"}})}
+                    })},
+                    {"required", json::array({"paper_id"})}
+                })}
+            },
+            {
+                {"name", "s2_get_citations"},
+                {"description", "Get papers that cite a given paper (citation network)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"paper_id", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"paper_id"})}
+                })}
+            },
+            {
+                {"name", "s2_get_references"},
+                {"description", "Get papers referenced by a given paper (reference list)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"paper_id", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"paper_id"})}
+                })}
+            },
+            {
+                {"name", "s2_get_author_papers"},
+                {"description", "Get an author's paper list from Semantic Scholar. Includes author name, total citations, h-index."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"author_id", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"author_id"})}
+                })}
+            },
+            {
+                {"name", "s2_search_author"},
+                {"description", "Search for authors on Semantic Scholar by name."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"name", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",5},{"minimum",1},{"maximum",20}})}
+                    })},
+                    {"required", json::array({"name"})}
+                })}
+            },
+            // ========== Stack Overflow 工具集(5 个 so_*) ==========
+            {
+                {"name", "so_search_questions"},
+                {"description", "Search Stack Overflow questions by keyword, with optional tag filter and sort order."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"tag", json::object({{"type","string"},{"description","Optional tag filter"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})},
+                        {"sort", json::object({{"type","string"},{"default","relevance"},{"enum",json::array({"relevance","newest","active","votes"})}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "so_get_question_detail"},
+                {"description", "Get full question detail with all answers from Stack Overflow."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"question_id", json::object({{"type","integer"}})}
+                    })},
+                    {"required", json::array({"question_id"})}
+                })}
+            },
+            {
+                {"name", "so_get_top_answers"},
+                {"description", "Get top-voted answers for a Stack Overflow question."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"question_id", json::object({{"type","integer"}})},
+                        {"count", json::object({{"type","integer"},{"default",3},{"minimum",1},{"maximum",20}})}
+                    })},
+                    {"required", json::array({"question_id"})}
+                })}
+            },
+            {
+                {"name", "so_search_by_tags"},
+                {"description", "Search Stack Overflow questions by tags (semicolon-separated, e.g. 'python;pandas')."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"tags", json::object({{"type","string"},{"description","Semicolon-separated tags e.g. python;django"}})},
+                        {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"tags"})}
+                })}
+            },
+            {
+                {"name", "so_get_similar"},
+                {"description", "Find similar Stack Overflow questions by title."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"title", json::object({{"type","string"}})},
+                        {"count", json::object({{"type","integer"},{"default",5},{"minimum",1},{"maximum",30}})}
+                    })},
+                    {"required", json::array({"title"})}
+                })}
             }
         })}
     };
 }
 
-// tools/call 的具体分发在 tools.cpp 中实现
+// tools/call 分发:按工具名前缀路由到各源独立 WebView 会话
 json McpServer::handle_tools_call(const json& params) {
+    if (!params.is_object()) {
+        return McpError("invalid params");
+    }
+    std::string name = params.value("name", std::string());
+    if (name.empty()) {
+        return McpError("missing 'name'");
+    }
+    json args = params.value("arguments", json::object());
+    if (!args.is_object()) args = json::object();
+
+    // 按前缀路由到各源 dispatcher
+    if (name.rfind("arxiv_", 0) == 0)  return dispatch_arxiv_tool(name, args);
+    if (name.rfind("hn_", 0) == 0)     return dispatch_hn_tool(name, args);
+    if (name.rfind("pkg_", 0) == 0)    return dispatch_pkg_tool(name, args);
+    if (name.rfind("pwc_", 0) == 0)    return dispatch_pwc_tool(name, args);
+    if (name.rfind("hf_", 0) == 0)     return dispatch_hf_tool(name, args);
+    if (name.rfind("s2_", 0) == 0)     return dispatch_s2_tool(name, args);
+    if (name.rfind("so_", 0) == 0)     return dispatch_so_tool(name, args);
+
+    // GitHub 工具走原路径
     return dispatch_tool_call(client_, params);
 }
 
@@ -444,10 +1120,20 @@ McpServer::HttpResult McpServer::handle_http_request(const std::string& method,
     // GET / -> 服务状态
     if (method == "GET" && (path == "/" || path == "/health")) {
         result.body = json{
-            {"service", "github-research-mcp"},
-            {"version", "0.1.0"},
+            {"service", "research-mcp"},
+            {"version", "0.2.0"},
             {"mode", "http"},
             {"status", "ok"},
+            {"sources", {
+                {"github", true},
+                {"arxiv", has_arxiv()},
+                {"hackernews", has_hackernews()},
+                {"package", has_package()},
+                {"paperswithcode", has_paperswithcode()},
+                {"huggingface", has_huggingface()},
+                {"semanticscholar", has_semanticscholar()},
+                {"stackoverflow", has_stackoverflow()}
+            }},
             {"endpoints", {
                 {"POST /mcp", "JSON-RPC 2.0 request"},
                 {"GET /", "service status"},
@@ -516,10 +1202,10 @@ McpServer::HttpResult McpServer::handle_http_request(const std::string& method,
 }
 
 int McpServer::run_http(int port) {
-    log("server starting in HTTP mode on port " + std::to_string(port));
+    this->log("server starting in HTTP mode on port " + std::to_string(port));
 
     if (!client_.is_ready()) {
-        log("webview2 will be initialized on first request");
+        this->log("webview2 will be initialized on first request");
     }
 
     // 用指针以便 lambda 能引用 server 并触发 stop()

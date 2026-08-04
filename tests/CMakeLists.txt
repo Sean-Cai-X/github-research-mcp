@@ -1,9 +1,8 @@
-# test_smoke 直接编译所需源文件,不链接 github-research-mcp(EXECUTABLE 不可被链接)
+# test_smoke 直接编译所需源文件,不链接 research-mcp(EXECUTABLE 不可被链接)
 add_executable(test_smoke
     test_smoke.cpp
     ${CMAKE_SOURCE_DIR}/src/github_client.cpp
     ${CMAKE_SOURCE_DIR}/src/webview_client.cpp
-    ${CMAKE_SOURCE_DIR}/src/winhttp_client.cpp
     ${CMAKE_SOURCE_DIR}/src/formatters.cpp
     ${CMAKE_SOURCE_DIR}/src/string_utils.cpp
 )

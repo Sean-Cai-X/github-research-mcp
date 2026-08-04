@@ -3,7 +3,7 @@
         "github-research": {
             "enabled": true,
             "type": "stdio",
-            "command": "D:/DeerFlow/DeerFlow++/build/Release/github-research-mcp.exe",
+            "command": "D:/DeerFlow/DeerFlow++/build/Release/research-mcp.exe",
             "args": [],
             "env": {
                 "GITHUB_TOKEN": "${GITHUB_TOKEN}",

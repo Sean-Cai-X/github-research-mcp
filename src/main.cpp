@@ -4,37 +4,47 @@
 #include <string>
 
 static void print_help() {
-    std::cerr << "github-research-mcp v0.1.0\n"
-              << "GitHub deep research MCP server (WebView2 browser backend)\n\n"
+    std::cerr << "research-mcp v0.2.0\n"
+              << "8-source research MCP server (unified WebView2 backend)\n"
+              << "Sources: GitHub + arXiv + HackerNews + npm/PyPI + PapersWithCode\n"
+              << "         + HuggingFace + SemanticScholar + StackOverflow\n\n"
               << "Usage:\n"
-              << "  github-research-mcp.exe                     Run as MCP stdio server (default)\n"
-              << "  github-research-mcp.exe --port <PORT>       Run as HTTP MCP server on given port\n"
-              << "  github-research-mcp.exe --port <PORT> --bind 0.0.0.0  (bind all interfaces)\n"
-              << "  github-research-mcp.exe --proxy <URL>       Set HTTP proxy (e.g. http://127.0.0.1:7897)\n"
-              << "  github-research-mcp.exe --help              Show this help\n\n"
-              << "HTTP endpoints (when --port is used):\n"
-              << "  POST /mcp        JSON-RPC 2.0 request (Content-Type: application/json)\n"
-              << "  GET  /           Service status\n"
-              << "  GET  /tools      List available tools\n\n"
-              << "Example:\n"
-              << "  github-research-mcp.exe --port 8765\n"
-              << "  curl -X POST http://127.0.0.1:8765/mcp \\\n"
-              << "       -H 'Content-Type: application/json' \\\n"
-              << "       -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'\n\n"
-              << "Proxy:\n"
-              << "  --proxy http://127.0.0.1:7897   Explicit proxy URL\n"
-              << "  Or set environment variables (read in this order):\n"
-              << "    HTTPS_PROXY / https_proxy\n"
-              << "    HTTP_PROXY  / http_proxy\n"
-              << "    ALL_PROXY   / all_proxy\n\n"
+              << "  research-mcp.exe [options]\n\n"
+              << "Options:\n"
+              << "  --port <PORT>              HTTP MCP server port (default: stdio mode)\n"
+              << "  --proxy <URL>              Proxy URL (applies to all sessions)\n"
+              << "  --gh-profile <DIR>         GitHub WebView user data dir (8-source isolation)\n"
+              << "  --arxiv-profile <DIR>      Enable arXiv WebView session\n"
+              << "  --hn-profile <DIR>         Enable Hacker News WebView session\n"
+              << "  --pkg-profile <DIR>        Enable npm/PyPI WebView session\n"
+              << "  --pwc-profile <DIR>        Enable Papers with Code WebView session\n"
+              << "  --hf-profile <DIR>         Enable Hugging Face WebView session\n"
+              << "  --s2-profile <DIR>         Enable Semantic Scholar WebView session\n"
+              << "  --so-profile <DIR>         Enable Stack Overflow WebView session\n"
+              << "  --help                     Show this help\n\n"
+              << "HTTP endpoints:\n"
+              << "  POST /mcp        JSON-RPC 2.0\n"
+              << "  GET  /           Service status (shows enabled sources)\n"
+              << "  GET  /tools      List all registered tools (49 total)\n\n"
+              << "Full example (all 8 sources):\n"
+              << "  research-mcp.exe --port 8765 \\\n"
+              << "    --gh-profile ./profiles/gh \\\n"
+              << "    --arxiv-profile ./profiles/arxiv \\\n"
+              << "    --hn-profile ./profiles/hn \\\n"
+              << "    --pkg-profile ./profiles/pkg \\\n"
+              << "    --pwc-profile ./profiles/pwc \\\n"
+              << "    --hf-profile ./profiles/hf \\\n"
+              << "    --s2-profile ./profiles/s2 \\\n"
+              << "    --so-profile ./profiles/so \\\n"
+              << "    --proxy http://127.0.0.1:7897\n\n"
+              << "Minimal (GitHub only, 13 tools):\n"
+              << "  research-mcp.exe --port 8765\n\n"
               << "Environment:\n"
-              << "  GITHUB_TOKEN             GitHub personal access token (optional)\n"
-              << "  GITHUB_RESEARCH_TIMEOUT  Request timeout in seconds (default: 30)\n"
-              << "  HTTPS_PROXY/HTTP_PROXY/ALL_PROXY  Proxy URL (if --proxy not given)\n";
+              << "  GITHUB_TOKEN             Personal access token (optional)\n"
+              << "  GITHUB_RESEARCH_TIMEOUT  Request timeout seconds (default: 30)\n"
+              << "  HTTPS_PROXY/HTTP_PROXY/ALL_PROXY  Proxy URL\n";
 }
 
-// 读取代理环境变量(按优先级:HTTPS_PROXY > HTTP_PROXY > ALL_PROXY)
-// 同时检查大小写变体(https_proxy 等)
 static std::string read_proxy_from_env() {
     const char* keys[] = {
         "HTTPS_PROXY", "https_proxy",
@@ -42,30 +52,33 @@ static std::string read_proxy_from_env() {
         "ALL_PROXY", "all_proxy",
         nullptr
     };
-    for (int i = 0; keys[i] != nullptr; ++i) {
-        const char* val = std::getenv(keys[i]);
-        if (val && val[0] != '\0') {
-            return std::string(val);
-        }
+    for (int i = 0; keys[i]; ++i) {
+        const char* v = std::getenv(keys[i]);
+        if (v && v[0]) return std::string(v);
     }
     return std::string();
 }
 
+static std::wstring s2w(const std::string& s) {
+    return std::wstring(s.begin(), s.end());
+}
+
+// 每个 --xxx-profile 参数的解析结果
+struct ProfileArgs {
+    std::string gh, arxiv, hn, pkg, pwc, hf, s2, so;
+};
+
 int main(int argc, char* argv[]) {
-    // 环境变量
     const char* token_env = std::getenv("GITHUB_TOKEN");
     const char* timeout_env = std::getenv("GITHUB_RESEARCH_TIMEOUT");
     int timeout = timeout_env ? std::atoi(timeout_env) : 30;
-
     std::optional<std::string> token;
-    if (token_env && token_env[0] != '\0') {
-        token = std::string(token_env);
-    }
+    if (token_env && token_env[0]) token = std::string(token_env);
 
-    // 解析命令行参数
-    int port = 0;  // 0 = stdio 模式
+    int port = 0;
     std::string proxy_url;
     bool proxy_explicit = false;
+    ProfileArgs profiles;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -79,11 +92,26 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
         } else if (arg == "--bind") {
-            // 当前实现固定监听 INADDR_ANY,--bind 参数仅用于向前兼容
             ++i;
         } else if (arg == "--proxy" && i + 1 < argc) {
             proxy_url = argv[++i];
             proxy_explicit = true;
+        } else if (arg == "--gh-profile" && i + 1 < argc) {
+            profiles.gh = argv[++i];
+        } else if (arg == "--arxiv-profile" && i + 1 < argc) {
+            profiles.arxiv = argv[++i];
+        } else if (arg == "--hn-profile" && i + 1 < argc) {
+            profiles.hn = argv[++i];
+        } else if (arg == "--pkg-profile" && i + 1 < argc) {
+            profiles.pkg = argv[++i];
+        } else if (arg == "--pwc-profile" && i + 1 < argc) {
+            profiles.pwc = argv[++i];
+        } else if (arg == "--hf-profile" && i + 1 < argc) {
+            profiles.hf = argv[++i];
+        } else if (arg == "--s2-profile" && i + 1 < argc) {
+            profiles.s2 = argv[++i];
+        } else if (arg == "--so-profile" && i + 1 < argc) {
+            profiles.so = argv[++i];
         } else {
             std::cerr << "Unknown argument: " << arg << "\n\n";
             print_help();
@@ -91,23 +119,42 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 代理设置:优先命令行 --proxy,其次环境变量 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY
-    if (!proxy_explicit) {
-        proxy_url = read_proxy_from_env();
-    }
+    if (!proxy_explicit) proxy_url = read_proxy_from_env();
 
     github_research::McpServer server(token, timeout);
 
-    // 设置代理(在 run/run_http 前调用)
     if (!proxy_url.empty()) {
         std::cerr << "[mcp] proxy: " << proxy_url << std::endl;
         server.set_proxy(proxy_url);
     } else {
-        std::cerr << "[mcp] proxy: none (direct connection)" << std::endl;
+        std::cerr << "[mcp] proxy: none (direct)" << std::endl;
     }
 
-    if (port > 0) {
-        return server.run_http(port);
+    // GitHub 后端独立 user data dir(8 源隔离)
+    if (!profiles.gh.empty()) {
+        std::cerr << "[mcp] init GitHub profile: " << profiles.gh << std::endl;
+        server.init_github_profile(profiles.gh);
     }
+
+    // 各源 WebView 会话按需初始化
+    auto tryInit = [&](const std::string& name, const std::string& path,
+                       auto initFn) {
+        if (path.empty()) return;
+        std::cerr << "[mcp] init " << name << " session: " << path << std::endl;
+        if (!initFn(s2w(path), proxy_url)) {
+            std::cerr << "[mcp] WARNING: " << name << " session init FAILED"
+                      << std::endl;
+        }
+    };
+
+    tryInit("arXiv",  profiles.arxiv, [&](auto d, auto p) { return server.init_arxiv(d, p); });
+    tryInit("HN",     profiles.hn,    [&](auto d, auto p) { return server.init_hackernews(d, p); });
+    tryInit("Package",profiles.pkg,   [&](auto d, auto p) { return server.init_package(d, p); });
+    tryInit("PWC",    profiles.pwc,   [&](auto d, auto p) { return server.init_paperswithcode(d, p); });
+    tryInit("HF",     profiles.hf,    [&](auto d, auto p) { return server.init_huggingface(d, p); });
+    tryInit("S2",     profiles.s2,    [&](auto d, auto p) { return server.init_semanticscholar(d, p); });
+    tryInit("SO",     profiles.so,    [&](auto d, auto p) { return server.init_stackoverflow(d, p); });
+
+    if (port > 0) return server.run_http(port);
     return server.run();
 }

@@ -1,30 +1,93 @@
 # github-research-mcp (DeerFlow++)
 
-GitHub 深度研究 MCP 服务,基于 WebView2 浏览器链路。
+8 源统一研究 MCP 服务,基于 **单一 WebView2 技术栈**。
 
 ## 特性
 
-- **13 个 GitHub 工具**:repo_info / readme / tree / languages / contributors / commits / branches / issues / pull_requests / releases / summarize_repo / search_repositories / search_users
-- **WebView2 浏览器链路**:Chromium 内核,完整浏览器指纹(TLS JA3 / HTTP/2 / Headers 顺序),反爬能力强
-- **分支枚举与按分支查询**:`github_get_branches` + `github_get_commits(branch=...)`,不再遗漏 codex/integration 等开发分支
-- **搜索与发现**:`github_search_repositories`(trending / 按星标 / 按话题)+ `github_search_users`(按作者 / 组织)
-- **自动系统代理 + 显式 `--proxy`**:支持 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 环境变量
+- **8 源 49 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **单一技术栈**:一个基类 `WebViewSession`,一种调用模式 `Navigate + ExecuteScript`,一种错误处理范式,一种日志输出格式,一种限流策略
+- **无 HTTP API 依赖**:不混入 WinHTTP / libcurl / cpr,避免两套网络层 / 两套错误处理 / 两套限流逻辑 / 两套调试方式
+- **统一原始文本提取**:所有工具统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI,工具不做复杂选择器适配
+- **多实例会话隔离**:每个数据源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享
+- **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
 - **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
-- **零运行时依赖**:静态链接 CRT,单 exe + WebView2Loader.dll
 
-## 截图示意
+## 架构
 
-### 分支提交分析(区分 master 与 codex/cxcore-integration 时间线)
+### 单一技术栈原则
 
-![Branch Analysis](assets/screenshots/branch_analysis.jpg)
+```
+┌─────────────────────────────────────────────────────────┐
+│                    MCP Server (HTTP/stdio)              │
+└────────────┬────────────────────────────────────────────┘
+             │ JSON-RPC 2.0 dispatch
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│  dispatch_<source>_tool  (按工具名前缀路由)              │
+│  github_* / arxiv_* / hn_* / pkg_* / pwc_* /            │
+│  hf_*   / s2_*    / so_*                                │
+└────────────┬────────────────────────────────────────────┘
+             │
+   ┌─────────┼─────────┬─────────┬─────────┬─────────┐
+   ▼         ▼         ▼         ▼         ▼         ▼
+┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
+│GitHub│ │arXiv │ │  HN  │ │ Pkg  │ │ PWC  │ │ ...  │
+│Client│ │Session│ │Session│ │Session│ │Session│ │ ...
+└──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
+   │        │        │        │        │        │
+   └────────┴────────┴────────┴────────┴────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │  WebView2 基类       │
+              │  Navigate + Execute │
+              │  Script             │
+              └─────────────────────┘
+```
 
-LLM 按新工作流自动调用 `github_get_branches` 枚举仓库全部分支,对活跃分支(codex/cxcore-integration)单独调用 `github_get_commits(branch=...)`,在报告中区分两条完全不同的时间线:master 停留在 2022-08-24,而 codex 分支活跃至 2026-08-02。
+### 调用模式(所有源统一)
 
-### 热点项目搜索与分析
+1. `Navigate(url)` —— 导航到目标 URL
+2. `WaitForNavigation(timeoutMs)` —— 等待 NavigationCompleted(pump 消息循环)
+3. `ExecuteScript(kJsExtractRawPage)` —— 执行统一 JS 提取原始页面文本
+4. 返回 `{success, url, title, text, html}` 给 MCP 客户端,AI 自行解析
 
-![Hot Repos](assets/screenshots/hot_repos.jpg)
+**统一 JS 脚本** `kJsExtractRawPage`(定义在 `webview_helpers.hpp`):
 
-LLM 按 Round 0 Discovery 工作流调用 `github_search_repositories(q="stars:>1000 pushed:>2026-07-01", sort=stars)`,返回近期高星活跃项目列表,并生成结构化分析表(项目名 / 简介 / 热门领域 / 核心价值)。
+```javascript
+(function(){
+    var text = document.body ? document.body.innerText : "";
+    if(text.length > 50000) text = text.substring(0, 50000);
+    var html = document.documentElement.outerHTML;
+    if(html.length > 50000) html = html.substring(0, 50000);
+    return JSON.stringify({
+        success: true,
+        url: window.location.href,
+        title: document.title || "",
+        text: text,
+        html: html
+    });
+})();
+```
+
+**设计理念**:工具只负责"取到页面内容",解析交给 AI。避免为每个站点维护复杂 DOM 选择器,降低维护成本。
+
+**不使用** `fetch()` / `XMLHttpRequest`(WebView2 ExecuteScript 不 await Promise,同步 XHR 被 Chromium 限制)。
+
+### 会话隔离
+
+每个数据源独立 `WebViewSession` 实例 + 独立 user data dir:
+
+| 源 | 类 | user data dir 参数 |
+|---|---|---|
+| GitHub | `WebViewClient`(基于 `WebViewSession`) | `--gh-profile` |
+| arXiv | `WebViewSession` | `--arxiv-profile` |
+| Hacker News | `WebViewSession` | `--hn-profile` |
+| npm/PyPI | `WebViewSession` | `--pkg-profile` |
+| Papers with Code | `WebViewSession` | `--pwc-profile` |
+| Hugging Face | `WebViewSession` | `--hf-profile` |
+| Semantic Scholar | `WebViewSession` | `--s2-profile` |
+| Stack Overflow | `WebViewSession` | `--so-profile` |
 
 ## 环境要求
 
@@ -40,24 +103,6 @@ LLM 按 Round 0 Discovery 工作流调用 `github_search_repositories(q="stars:>
 | WebView2 SDK | NuGet 包 `Microsoft.Web.WebView2`,解压到 `third_party/WebView2/` |
 | nlohmann/json | vcpkg 安装,或单 header 放到 `third_party/json/include/` |
 
-### WebView2 SDK 布局
-
-```
-third_party/WebView2/
-├── include/
-│   ├── WebView2.h
-│   ├── WebView2Environment.h
-│   └── WebView2Experimental.h(可选)
-├── lib/
-│   └── x64/
-│       └── WebView2Loader.dll.lib
-└── redist/
-    └── x64/
-        └── WebView2Loader.dll
-```
-
-下载 NuGet 包后用 7zip 解压,按上述布局放置即可。
-
 ## 构建
 
 ```powershell
@@ -67,449 +112,144 @@ cmake --build build --config Release
 ```
 
 构建产物:
-- `build/Release/github-research-mcp.exe`
+- `build/Release/research-mcp.exe`
 - `build/Release/WebView2Loader.dll`
 
-## 配置
+## 启动
 
-复制 `.env.example` 为 `.env` 并填写:
+### 单源模式(仅 GitHub,向后兼容)
+
+```powershell
+.\research-mcp.exe --port 9876 --proxy http://127.0.0.1:7897
+```
+
+### 8 源全量模式(推荐)
+
+```powershell
+.\research-mcp.exe --port 8765 `
+  --gh-profile    ./profiles/gh `
+  --arxiv-profile ./profiles/arxiv `
+  --hn-profile    ./profiles/hn `
+  --pkg-profile   ./profiles/pkg `
+  --pwc-profile   ./profiles/pwc `
+  --hf-profile    ./profiles/hf `
+  --s2-profile    ./profiles/s2 `
+  --so-profile    ./profiles/so `
+  --proxy http://127.0.0.1:7897
+```
+
+启动成功日志:
 
 ```
-GITHUB_TOKEN=your-github-personal-access-token
-GITHUB_RESEARCH_TIMEOUT=30
+[mcp] proxy: http://127.0.0.1:7897
+[mcp] init GitHub profile: ./profiles/gh
+[mcp] init arXiv session: ./profiles/arxiv
+[session] WebView2 ready, profile: ./profiles/arxiv
+[mcp] arXiv session ready
+[mcp] init HN session: ./profiles/hn
+[session] WebView2 ready, profile: ./profiles/hn
+[mcp] HackerNews session ready
+...
+[mcp] init SO session: ./profiles/so
+[session] WebView2 ready, profile: ./profiles/so
+[mcp] StackOverflow session ready
+[mcp] server starting in HTTP mode on port 8765
+[http] MCP server listening on http://127.0.0.1:8765/mcp (Ctrl+C to stop)
 ```
 
-或在 MCP 客户端配置中直接设置环境变量(见 `mcp_config_example.json`)。
+### 命令行参数
+
+| 参数 | 说明 |
+|---|---|
+| `--port <PORT>` | HTTP MCP server 端口(默认:stdio 模式) |
+| `--proxy <URL>` | 代理 URL(应用到所有 WebView 会话) |
+| `--gh-profile <DIR>` | GitHub WebView user data dir(8 源隔离) |
+| `--arxiv-profile <DIR>` | 启用 arXiv WebView 会话 |
+| `--hn-profile <DIR>` | 启用 Hacker News WebView 会话 |
+| `--pkg-profile <DIR>` | 启用 npm/PyPI WebView 会话 |
+| `--pwc-profile <DIR>` | 启用 Papers with Code WebView 会话 |
+| `--hf-profile <DIR>` | 启用 Hugging Face WebView 会话 |
+| `--s2-profile <DIR>` | 启用 Semantic Scholar WebView 会话 |
+| `--so-profile <DIR>` | 启用 Stack Overflow WebView 会话 |
+
+未指定 `--xxx-profile` 的源不启用,对应工具调用返回 `session not initialized`。
 
 ## 代理设置
 
 WebView2 浏览器链路通过 Chromium 内核的 `--proxy-server` 命令行参数支持显式代理。
 代理优先级:**命令行 `--proxy`** > 环境变量(`HTTPS_PROXY` > `HTTP_PROXY` > `ALL_PROXY`)。
 
-### 代理配置链路
-
-| 层级 | 文件 | 职责 |
-|---|---|---|
-| 入口 | [src/main.cpp](src/main.cpp) | 解析 `--proxy` 参数,读取环境变量 |
-| 转发 | [include/github_research/mcp_server.hpp](include/github_research/mcp_server.hpp) | `McpServer::set_proxy` → `GitHubClient::set_proxy` |
-| 传递 | [include/github_research/github_client.hpp](include/github_research/github_client.hpp) | `GitHubClient::set_proxy` → `WebViewClient::set_proxy` |
-| 应用 | [src/webview_client.cpp](src/webview_client.cpp) | `CoreWebView2EnvironmentOptions` 携带 `--proxy-server` 启动 Chromium |
-
-> 注意:`set_proxy` 必须在 `initialize()` / `run()` / `run_http()` 之前调用,否则 Chromium 进程已启动,代理参数无法注入。
-
-### 使用方式
-
-#### 方式 1:命令行参数(推荐)
+### 方式 1:命令行参数(推荐)
 
 ```powershell
-.\github-research-mcp.exe --port 9876 --proxy http://127.0.0.1:7897
+.\research-mcp.exe --port 8765 --proxy http://127.0.0.1:7897
 ```
 
-#### 方式 2:环境变量
+### 方式 2:环境变量
 
 ```powershell
-$Proxy = "http://127.0.0.1:7897"
-$env:HTTPS_PROXY = $Proxy
-$env:HTTP_PROXY  = $Proxy
-$env:ALL_PROXY   = $Proxy
-.\github-research-mcp.exe --port 9876
-```
-
-#### 方式 3:MCP 客户端配置(Claude Desktop / TRAE)
-
-在 `claude_desktop_config.json` 中通过 `env` 注入:
-
-```json
-{
-  "mcpServers": {
-    "github-research": {
-      "command": "D:\\DeerFlow\\DeerFlow++\\build\\Release\\github-research-mcp.exe",
-      "args": ["--proxy", "http://127.0.0.1:7897"],
-      "env": {
-        "GITHUB_TOKEN": "ghp_xxx"
-      }
-    }
-  }
-}
-```
-
-或仅使用环境变量(让本服务自动读取):
-
-```json
-{
-  "mcpServers": {
-    "github-research": {
-      "command": "D:\\DeerFlow\\DeerFlow++\\build\\Release\\github-research-mcp.exe",
-      "env": {
-        "GITHUB_TOKEN": "ghp_xxx",
-        "HTTPS_PROXY": "http://127.0.0.1:7897",
-        "HTTP_PROXY":  "http://127.0.0.1:7897",
-        "ALL_PROXY":   "http://127.0.0.1:7897"
-      }
-    }
-  }
-}
+$env:HTTPS_PROXY = "http://127.0.0.1:7897"
+$env:HTTP_PROXY  = "http://127.0.0.1:7897"
+.\research-mcp.exe --port 8765
 ```
 
 ### 代理参数格式
 
 | 格式 | 示例 | 说明 |
 |---|---|---|
-| `http://host:port` | `http://127.0.0.1:7897` | HTTP 代理(Chromium 会自动去掉 `http://` 前缀) |
+| `http://host:port` | `http://127.0.0.1:7897` | HTTP 代理(自动剥离 `http://` 前缀) |
 | `http://user:pass@host:port` | `http://user:pass@proxy.example.com:8080` | 带认证的代理 |
 | `socks5://host:port` | `socks5://127.0.0.1:1080` | SOCKS5 代理 |
 
-> 注意:Chromium 的 `--proxy-server` 参数不接受带 `http://` scheme 前缀的 URL,本服务在 [src/webview_client.cpp](src/webview_client.cpp) 中已自动剥离该前缀,用户可直接使用完整 URL。
+## 验证调用
 
-### 启动日志验证
-
-代理生效时,stderr 会输出:
-
-```
-[mcp] proxy: http://127.0.0.1:7897
-[webview] using proxy: http://127.0.0.1:7897
-[webview] user data dir: ...
-[webview] initialized (origin: https://api.github.com)
-```
-
-未设置代理时输出:
-
-```
-[mcp] proxy: none (direct connection)
-```
-
-### 验证调用
-
-启动后通过 curl 调用任意 GitHub 工具,确认能正常返回数据即代理生效:
+### tools/list
 
 ```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
+curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
   -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"github_get_repo_info\",\"arguments\":{\"owner\":\"Sean-Cai-X\",\"repo\":\"github-research-mcp\"}}}"
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"
 ```
 
-### WinHTTP 模式(暂未启用)
-
-当前版本仅支持 WebView2 浏览器链路的代理设置。WinHTTP 客户端的代理参数读取已预留接口(`WinHttpClient` 的环境变量读取逻辑),后续启用时无需改动入口与配置链路。
-
-## 客户端配置
-
-参考 `mcp_config_example.json`,在 MCP 客户端(如 Claude Desktop)配置文件中添加 4 个 MCP server:
-
-1. **github-research**(本项目)- GitHub 数据采集
-2. **brave-search** - Web 搜索(替代 DeerFlow web_search)
-3. **fetch** - URL 抓取(替代 DeerFlow web_fetch)
-4. **filesystem** - 写报告文件
-
-将 `system_prompt.md` 内容作为客户端的 system prompt 或 project instructions 注入。
-
-## llama.cpp 集成
-
-llama.cpp server(自 `b4000+` 起)原生支持 MCP,有两种角色,均可与本服务对接。
-
-### 角色 1:llama.cpp 作为 MCP Client(推荐)
-
-llama.cpp server 通过 `--mcp` 参数挂载远端 MCP server,工具自动暴露为内置 `McpServer` tool,LLM 即可在对话中调用。
-
-#### 启动 github-research-mcp
+### arXiv 可用性检查
 
 ```powershell
-# 先启动本服务(HTTP 模式)
-cd D:\DeerFlow\DeerFlow++\build\Release
-.\github-research-mcp.exe --port 9876
-```
-
-#### 启动 llama.cpp server
-
-```powershell
-llama-server.exe ^
-  -m Qwen2.5-7B-Instruct.Q4_K_M.gguf ^
-  --port 8080 ^
-  --mcp http://127.0.0.1:9876/mcp
-```
-
-参数说明:
-
-| 参数 | 语义 |
-|---|---|
-| `--mcp <URL>` | 挂载远端 MCP server(Streamable HTTP),URL 指向 `/mcp` 端点 |
-| `--mcp-timeout <ms>` | 单次工具调用超时(默认 60000ms) |
-| `--mcp-headers` | 自定义请求头(JSON 格式) |
-| `--mcp-strict` | 严格模式,工具 schema 校验失败即拒绝 |
-
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `notifications/initialized` → `tools/list`,把 12 个 `github_*` 工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="github_get_repo_info", arguments={...})` 形式调用。
-
-#### curl 直接调用语义示例
-
-完整 JSON-RPC 2.0 调用序列(参考用,实际由 llama.cpp 自动完成):
-
-**1. initialize(握手)**
-
-```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
+curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
   -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"llama.cpp\",\"version\":\"b4000\"}}}"
+  -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"arxiv_check_available\",\"arguments\":{}}}"
 ```
 
 响应:
 
 ```json
 {
-  "id": 1,
-  "jsonrpc": "2.0",
+  "id": 2, "jsonrpc": "2.0",
   "result": {
-    "protocolVersion": "2024-11-05",
-    "capabilities": {"tools": {}},
-    "serverInfo": {"name": "github-research-mcp", "version": "0.1.0"}
+    "content": [{"type":"text","text":"{\"available\":true,\"page_title\":\"arXiv.org e-Print archive\",\"success\":true}"}],
+    "isError": false
   }
 }
 ```
 
-**2. notifications/initialized(通知,无响应)**
+### Hacker News 头条
 
 ```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
+curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
   -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"
+  -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"hn_get_top_stories\",\"arguments\":{\"count\":3}}}"
 ```
 
-返回 HTTP 202(无 body)。
-
-**3. tools/list(枚举工具)**
+### GitHub 仓库信息
 
 ```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
+curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
   -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"
+  -d "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"github_get_repo_info\",\"arguments\":{\"owner\":\"bytedance\",\"repo\":\"deer-flow\"}}}"
 ```
 
-响应(节选):
+## 工具列表(49 个)
 
-```json
-{
-  "id": 2,
-  "jsonrpc": "2.0",
-  "result": {
-    "tools": [
-      {
-        "name": "github_get_repo_info",
-        "description": "Get basic repository information",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "owner": {"type": "string", "description": "Repository owner"},
-            "repo": {"type": "string", "description": "Repository name"}
-          },
-          "required": ["owner", "repo"]
-        }
-      },
-      {
-        "name": "github_summarize_repo",
-        "description": "Get comprehensive repository summary",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "owner": {"type": "string"},
-            "repo": {"type": "string"}
-          },
-          "required": ["owner", "repo"]
-        }
-      }
-    ]
-  }
-}
-```
-
-**4. tools/call(真实调用)**
-
-```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
-  -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"github_get_repo_info\",\"arguments\":{\"owner\":\"bytedance\",\"repo\":\"deer-flow\"}}}"
-```
-
-响应:
-
-```json
-{
-  "id": 3,
-  "jsonrpc": "2.0",
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "{\"name\":\"deer-flow\",\"full_name\":\"bytedance/deer-flow\",\"stargazers_count\":12345,...}"
-      }
-    ]
-  }
-}
-```
-
-**5. shutdown(优雅停止)**
-
-```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:9876/mcp ^
-  -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"shutdown\"}"
-```
-
-#### LLM 对话调用示例
-
-llama.cpp 启动后,LLM 在对话中会自动生成如下 tool_call:
-
-```json
-{
-  "tool": "McpServer",
-  "parameters": {
-    "name": "github_summarize_repo",
-    "arguments": {"owner": "bytedance", "repo": "deer-flow"}
-  }
-}
-```
-
-用户问:`请对 bytedance/deer-flow 进行深度研究`
-
-LLM 自动按以下顺序调用:
-
-```
-1. McpServer(name="github_summarize_repo",      arguments={owner, repo})
-2. McpServer(name="github_get_readme",          arguments={owner, repo})
-3. McpServer(name="github_get_tree",            arguments={owner, repo, max_depth=3})
-4. McpServer(name="github_get_commits",         arguments={owner, repo, limit=50})
-5. McpServer(name="github_get_issues",          arguments={owner, repo, state="all", limit=30})
-6. McpServer(name="github_get_pull_requests",   arguments={owner, repo, state="all", limit=30})
-7. McpServer(name="github_get_releases",        arguments={owner, repo, limit=10})
-```
-
-### 角色 2:llama.cpp 作为 MCP Server
-
-llama.cpp server 自身也可作为 MCP server 暴露给其他 client(如 Claude Desktop),通过 `--mcp-server` 开启。
-
-```powershell
-llama-server.exe ^
-  -m Qwen2.5-7B-Instruct.Q4_K_M.gguf ^
-  --port 8080 ^
-  --mcp-server
-```
-
-开启后 llama.cpp 在 `/mcp` 路径暴露 `llama_chat` 工具,其他 client 可通过 MCP 协议调用 LLM 对话能力。
-
-**与 github-research-mcp 串联**:
-
-```
-Claude Desktop
-    │ (MCP over stdio)
-    ▼
-llama.cpp server (--mcp-server, port 8080)
-    │ (HTTP, --mcp)
-    ▼
-github-research-mcp (--port 9876)
-    │ (WebView2)
-    ▼
-api.github.com
-```
-
-Claude Desktop 配置(`claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "llama-llm": {
-      "command": "llama-server.exe",
-      "args": ["-m", "Qwen2.5-7B.gguf", "--mcp-server"],
-      "env": {}
-    },
-    "github-research": {
-      "command": "D:\\DeerFlow\\DeerFlow++\\build\\Release\\github-research-mcp.exe",
-      "args": [],
-      "env": {
-        "GITHUB_TOKEN": "ghp_xxx"
-      }
-    }
-  }
-}
-```
-
-### 协议兼容性
-
-| 协议项 | 支持情况 | 说明 |
-|---|---|---|
-| JSON-RPC 2.0 | ✅ | 标准 request/response/notification |
-| MCP 版本 | 2024-11-05 | `initialize` 协议握手版本 |
-| 传输方式 | stdio + HTTP | HTTP 路径 `/mcp`,Content-Type `application/json` |
-| 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
-| CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
-| OPTIONS 预检 | ✅ | 自动返回 200 |
-| Streamable HTTP | 部分 | 当前为同步响应,未实现 SSE 长连接 |
-| `tools/list` | ✅ | 10 个 `github_*` 工具 |
-| `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
-| `ping` | ✅ | 心跳保活 |
-| `shutdown` | ✅ | 触发 server 优雅停止 |
-
-### 语义调用对照表
-
-| 用户意图 | 调用工具 | 关键参数 |
-|---|---|---|
-| 看仓库基本信息 | `github_get_repo_info` | `owner`, `repo` |
-| 看综合摘要 | `github_summarize_repo` | `owner`, `repo` |
-| 读 README | `github_get_readme` | `owner`, `repo` |
-| 看目录结构 | `github_get_tree` | `owner`, `repo`, `max_depth=3`, `recursive=true` |
-| 看语言分布 | `github_get_languages` | `owner`, `repo` |
-| 看贡献者 | `github_get_contributors` | `owner`, `repo`, `limit=30` |
-| 看近期提交 | `github_get_commits` | `owner`, `repo`, `limit=50`, `branch`(可选) |
-| 看全部分支 | `github_get_branches` | `owner`, `repo`, `limit=100` |
-| 搜索仓库 | `github_search_repositories` | `q`, `sort`(可选), `order`, `limit`, `page` |
-| 搜索作者 | `github_search_users` | `q`, `sort`(可选), `order`, `limit`, `page` |
-| 看 Issues | `github_get_issues` | `owner`, `repo`, `state="all"`, `limit=30` |
-| 看 PR | `github_get_pull_requests` | `owner`, `repo`, `state="all"`, `limit=30` |
-| 看发布历史 | `github_get_releases` | `owner`, `repo`, `limit=10` |
-
-### 故障排查
-
-**`Connection failed during initialize: capabilities.tools expected object`**
-
-已修复(2026-08-03)。原因是 `capabilities.tools` 曾返回 `null`,现返回 `{}`。请使用最新构建的 exe。
-
-**`HTTP 426 Upgrade Required`**
-
-llama.cpp 早期版本要求 SSE 长连接。本服务当前为同步 HTTP,请使用 `b4000+` 版本的 llama.cpp(支持 Streamable HTTP 同步模式)。
-
-**`WebView2 initialization timeout`**
-
-Edge Runtime 缺失或被沙箱阻止。检查:
-1. `reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv` 应返回版本号
-2. 在非沙箱环境(真实 Windows 终端)运行
-3. 设置 `WEBVIEW2_USER_DATA_DIR` 环境变量到可写目录
-
-**`fetch error: Failed to fetch`**
-
-CORS 或网络问题。GitHub API 返回 `Access-Control-Allow-Origin: *`,正常情况下不会触发 CORS。检查系统代理设置。
-
-## 使用
-
-配置完成后,在客户端中对任意 GitHub 仓库发起深度研究请求,例如:
-
-```
-请对 bytedance/deer-flow 进行深度研究,生成完整报告
-```
-
-客户端会按 `system_prompt.md` 中的 4 轮工作流自动调用工具,最终生成 `research_bytedance_deer-flow_{YYYYMMDD}.md` 报告。
-
-## 测试
-
-```powershell
-cd D:\DeerFlow\DeerFlow++
-cmake --build build --config Release --target test_smoke
-.\build\Release\test_smoke.exe
-```
-
-测试覆盖:
-- 字符串工具(url_encode / to_lower / iequals)
-- WebView2 初始化
-- 真实 GitHub API 调用(summarize_repo)
-- 404 错误处理
-
-## 工具列表
+### GitHub(13 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -524,51 +264,134 @@ cmake --build build --config Release --target test_smoke
 | `github_get_pull_requests` | PR 列表 |
 | `github_get_releases` | 发布历史 |
 | `github_summarize_repo` | 综合摘要 |
-| `github_search_repositories` | 按项目名 / 语言 / topic / stars 搜索仓库 |
+| `github_search_repositories` | 按项目名 / 语言 / topic / stars 搜索仓库(trending / discovery) |
 | `github_search_users` | 按作者名 / 组织 / 地区 / 粉丝数搜索用户 |
 
-### 搜索查询语法示例
+### arXiv(4 个)
 
-`github_search_repositories` 与 `github_search_users` 的 `q` 参数支持 GitHub Search 语法,可叠加多个限定符:
+| 工具 | 说明 |
+|---|---|
+| `arxiv_search_papers` | 按关键词 / 分类搜索论文 |
+| `arxiv_get_paper_detail` | 获取论文详情(标题、作者、摘要、PDF 链接) |
+| `arxiv_get_pdf_link` | 根据 arXiv ID 生成 PDF / abs 链接 |
+| `arxiv_check_available` | 检查 arXiv 网站可用性 |
 
-**仓库搜索**(`github_search_repositories`):
+### Hacker News(5 个)
 
-| 场景 | `q` 示例 | 说明 |
+| 工具 | 说明 |
+|---|---|
+| `hn_get_top_stories` | 头条故事 |
+| `hn_get_new_stories` | 最新故事 |
+| `hn_get_best_stories` | 精选故事 |
+| `hn_get_item` | 获取单个 item(故事 / 评论) |
+| `hn_search_by_keyword` | 按关键词搜索 |
+
+### npm / PyPI(4 个)
+
+| 工具 | 说明 |
+|---|---|
+| `pkg_search_npm` | 搜索 npm 包 |
+| `pkg_get_npm_detail` | 获取 npm 包详情 |
+| `pkg_search_pypi` | 搜索 PyPI 包 |
+| `pkg_get_pypi_detail` | 获取 PyPI 包详情 |
+
+### Papers with Code(5 个)
+
+| 工具 | 说明 |
+|---|---|
+| `pwc_search_papers` | 搜索论文 |
+| `pwc_get_paper_detail` | 论文详情 |
+| `pwc_get_sota` | 获取 SOTA(State-of-the-Art)结果 |
+| `pwc_search_tasks` | 搜索任务 |
+| `pwc_search_datasets` | 搜索数据集 |
+
+### Hugging Face(7 个)
+
+| 工具 | 说明 |
+|---|---|
+| `hf_search_models` | 搜索模型 |
+| `hf_get_model_info` | 模型详情 |
+| `hf_get_model_readme` | 模型 README |
+| `hf_search_datasets` | 搜索数据集 |
+| `hf_get_dataset_info` | 数据集详情 |
+| `hf_get_trending_models` | 热门模型 |
+| `hf_search_spaces` | 搜索 Spaces |
+
+### Semantic Scholar(6 个)
+
+| 工具 | 说明 |
+|---|---|
+| `s2_search_papers` | 搜索论文 |
+| `s2_get_paper_detail` | 论文详情 |
+| `s2_get_citations` | 引用列表 |
+| `s2_get_references` | 参考文献列表 |
+| `s2_get_author_papers` | 作者论文列表 |
+| `s2_search_author` | 搜索作者 |
+
+### Stack Overflow(5 个)
+
+| 工具 | 说明 |
+|---|---|
+| `so_search_questions` | 搜索问题 |
+| `so_get_question_detail` | 问题详情(含答案) |
+| `so_get_top_answers` | 获取热门答案 |
+| `so_search_by_tags` | 按标签搜索 |
+| `so_get_similar` | 获取相似问题 |
+
+## 客户端配置
+
+### Claude Desktop / TRAE
+
+```json
+{
+  "mcpServers": {
+    "github-research": {
+      "command": "D:\\DeerFlow\\DeerFlow++\\build\\Release\\research-mcp.exe",
+      "args": [
+        "--port", "8765",
+        "--gh-profile",    "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\gh",
+        "--arxiv-profile", "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\arxiv",
+        "--hn-profile",    "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\hn",
+        "--pkg-profile",   "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\pkg",
+        "--pwc-profile",   "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\pwc",
+        "--hf-profile",    "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\hf",
+        "--s2-profile",    "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\s2",
+        "--so-profile",    "D:\\DeerFlow\\DeerFlow++\\build\\Release\\profiles\\so",
+        "--proxy", "http://127.0.0.1:7897"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_xxx"
+      }
+    }
+  }
+}
+```
+
+### llama.cpp 集成
+
+```powershell
+llama-server.exe ^
+  -m Qwen2.5-7B-Instruct.Q4_K_M.gguf ^
+  --port 8080 ^
+  --mcp http://127.0.0.1:8765/mcp
+```
+
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 49 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
+
+## 协议兼容性
+
+| 协议项 | 支持情况 | 说明 |
 |---|---|---|
-| 按项目名 | `cxvision` | 模糊匹配 name / description / readme |
-| 按语言 | `opencv language:C++` | 限定主语言 |
-| 按 topic | `cv topic:computer-vision` | 按 GitHub Topics 分类 |
-| 按热度 | `vision stars:>1000` | stars 下限 |
-| 按活跃 | `cv pushed:>2025-01-01` | 排除僵尸项目 |
-| 按作者 | `cv user:opencv` | 限定 owner |
-| 按许可证 | `cv license:MIT` | 按 SPDX 许可证 |
-| 综合查询 | `vision language:C++ stars:>500 pushed:>2025-01-01 sort:stars` | 多限定符叠加 |
-
-**作者搜索**(`github_search_users`):
-
-| 场景 | `q` 示例 | 说明 |
-|---|---|---|
-| 按名字 | `cxvisionai` | login / fullname 匹配 |
-| 找组织 | `cv type:org` | 只搜 Organization |
-| 找个人 | `cv type:user` | 只搜 User |
-| 按粉丝 | `cv followers:>100` | 粉丝数下限 |
-| 按地区 | `cv location:China` | 按 profile location |
-| 按语言 | `cv language:C++` | 按 profile 语言 |
-| 按产出 | `cv repos:>50` | 公开仓库数下限 |
-
-**排序方式**:
-
-| `sort` 值 | 仓库 | 用户 |
-|---|---|---|
-| `stars` | ⭐ star 数 | — |
-| `forks` | fork 数 | — |
-| `updated` | 最近更新 | — |
-| `followers` | — | ⭐ 粉丝数 |
-| `repositories` | — | 公开仓库数 |
-| `joined` | — | 注册时间 |
-| 省略 | best-match | best-match |
-
-`order` 取值:`desc`(默认,降序)/ `asc`(升序)。
+| JSON-RPC 2.0 | ✅ | 标准 request/response/notification |
+| MCP 版本 | 2024-11-05 | `initialize` 协议握手版本 |
+| 传输方式 | stdio + HTTP | HTTP 路径 `/mcp`,Content-Type `application/json` |
+| 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
+| CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
+| OPTIONS 预检 | ✅ | 自动返回 200 |
+| `tools/list` | ✅ | 49 个工具(8 源) |
+| `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
+| `ping` | ✅ | 心跳保活 |
+| `shutdown` | ✅ | 触发 server 优雅停止 |
 
 ## 错误处理
 
@@ -578,10 +401,47 @@ cmake --build build --config Release --target test_smoke
 {"error":"repository not found","status_code":404,"url":"https://api.github.com/repos/..."}
 ```
 
-限流错误附带 `reset_at`:
+GitHub 限流错误附带 `reset_at`:
 
 ```json
 {"error":"rate limit exceeded","status_code":429,"reset_at":"1785724800"}
+```
+
+会话未初始化错误:
+
+```json
+{"error":"ERROR: arXiv WebView session not initialized."}
+```
+
+## 故障排查
+
+### `WebView2 initialization timeout`
+
+Edge Runtime 缺失或被沙箱阻止。检查:
+1. `reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv` 应返回版本号
+2. 在非沙箱环境(真实 Windows 终端)运行
+3. 设置 `WEBVIEW2_USER_DATA_DIR` 环境变量到可写目录
+
+### `HTTP 403`(GitHub)
+
+GitHub API 限流(每小时 60 次/未认证)。解决:
+1. 设置 `GITHUB_TOKEN` 环境变量(Personal Access Token,每小时 5000 次)
+2. 等待限流重置(查看响应头 `X-RateLimit-Reset`)
+
+### `session not initialized`
+
+对应源的 `--xxx-profile` 参数未指定。检查启动命令是否包含全部 8 个 `--xxx-profile` 参数。
+
+### `fetch_result preview: {}`
+
+WebView2 ExecuteScript 不 await Promise 的已知问题。本服务已改用 `Navigate + ExecuteScript` 模式(读取 `document.body.innerText`),不再使用 `fetch()` / `XMLHttpRequest`。如仍出现此错误,请确认使用最新构建的 exe。
+
+## 测试
+
+```powershell
+cd D:\DeerFlow\DeerFlow++
+cmake --build build --config Release --target test_smoke
+.\build\Release\test_smoke.exe
 ```
 
 ## 与 DeerFlow 原版的差异
@@ -592,8 +452,8 @@ cmake --build build --config Release --target test_smoke
 | HTTP 后端 | Python requests | WebView2(Chromium 内核) |
 | 浏览器指纹 | 无 | 完整(与 Edge 一致) |
 | 反爬能力 | 弱 | 强(真实浏览器) |
+| 数据源 | GitHub 单源 | 8 源统一接入 |
 | 编排主体 | agent runtime | 本地 LLM 客户端 |
-| 记忆 | DeerMem 持久化 | 无(需另接 mem0 MCP) |
 | 平台 | 跨平台 | Windows 10/11 专属 |
 
 ## 许可

@@ -43,6 +43,11 @@ public:
     // 传递给 WebView2 的 Chromium 内核 --proxy-server 参数
     void set_proxy(const std::string& proxy_url) { proxy_url_ = proxy_url; }
 
+    // 设置用户数据目录(必须在 initialize() 前调用)
+    // 用于隔离 GitHub 后端与其他会话,避免 user data dir 冲突 (0x800700aa)
+    // 路径使用 UTF-8,内部转换为宽字符
+    void set_user_data_dir(const std::string& dir) { user_data_dir_ = dir; }
+
     // 关闭并释放资源
     void shutdown();
 
@@ -91,6 +96,7 @@ private:
     int timeout_seconds_;
     bool use_system_proxy_;
     std::string proxy_url_;  // 显式代理 URL,空表示不设置
+    std::string user_data_dir_;  // 外部指定 user data dir,空表示用默认路径
 };
 
 } // namespace github_research

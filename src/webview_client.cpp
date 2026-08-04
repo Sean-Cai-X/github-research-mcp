@@ -65,39 +65,47 @@ bool WebViewClient::create_hidden_window() {
 
 bool WebViewClient::create_environment() {
     // 用户数据目录选择策略(按优先级):
+    // 0. 外部 set_user_data_dir() 指定的目录(优先,用于多实例隔离)
     // 1. WEBVIEW2_USER_DATA_DIR 环境变量(用户显式指定)
-    // 2. %LOCALAPPDATA%\github-research-mcp\webview2-data (标准位置,推荐)
-    // 3. %TEMP%\github-research-mcp-webview2 (回退,确保可写)
+    // 2. %LOCALAPPDATA%\research-mcp\webview2-data (标准位置,推荐)
+    // 3. %TEMP%\research-mcp-webview2 (回退,确保可写)
     // 4. exe 同级目录\webview2-data (最后回退)
     std::wstring user_data_dir;
-    wchar_t env_dir[MAX_PATH];
-    DWORD env_len = GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_DIR", env_dir, MAX_PATH);
-    if (env_len > 0 && env_len < MAX_PATH) {
-        user_data_dir = env_dir;
-        std::cerr << "[webview] using WEBVIEW2_USER_DATA_DIR: ";
+    if (!user_data_dir_.empty()) {
+        // 优先使用外部指定的目录(用于 8 源会话隔离)
+        user_data_dir = to_wstring(user_data_dir_);
+        std::cerr << "[webview] using external user data dir: ";
         std::wcerr << user_data_dir << std::endl;
     } else {
-        // 尝试 %LOCALAPPDATA%
-        wchar_t local_app[MAX_PATH];
-        DWORD la_len = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app, MAX_PATH);
-        if (la_len > 0 && la_len < MAX_PATH) {
-            user_data_dir = std::wstring(local_app) + L"\\github-research-mcp\\webview2-data";
+        wchar_t env_dir[MAX_PATH];
+        DWORD env_len = GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_DIR", env_dir, MAX_PATH);
+        if (env_len > 0 && env_len < MAX_PATH) {
+            user_data_dir = env_dir;
+            std::cerr << "[webview] using WEBVIEW2_USER_DATA_DIR: ";
+            std::wcerr << user_data_dir << std::endl;
         } else {
-            // 回退到 %TEMP%
-            wchar_t temp_dir[MAX_PATH];
-            DWORD t_len = GetEnvironmentVariableW(L"TEMP", temp_dir, MAX_PATH);
-            if (t_len > 0 && t_len < MAX_PATH) {
-                user_data_dir = std::wstring(temp_dir) + L"\\github-research-mcp-webview2";
+            // 尝试 %LOCALAPPDATA%
+            wchar_t local_app[MAX_PATH];
+            DWORD la_len = GetEnvironmentVariableW(L"LOCALAPPDATA", local_app, MAX_PATH);
+            if (la_len > 0 && la_len < MAX_PATH) {
+                user_data_dir = std::wstring(local_app) + L"\\research-mcp\\webview2-data";
             } else {
-                // 最后回退:exe 同级目录
-                wchar_t exe_path[MAX_PATH];
-                GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-                std::wstring exe_dir = exe_path;
-                size_t last_sep = exe_dir.find_last_of(L"\\/");
-                if (last_sep != std::wstring::npos) {
-                    exe_dir = exe_dir.substr(0, last_sep);
+                // 回退到 %TEMP%
+                wchar_t temp_dir[MAX_PATH];
+                DWORD t_len = GetEnvironmentVariableW(L"TEMP", temp_dir, MAX_PATH);
+                if (t_len > 0 && t_len < MAX_PATH) {
+                    user_data_dir = std::wstring(temp_dir) + L"\\research-mcp-webview2";
+                } else {
+                    // 最后回退:exe 同级目录
+                    wchar_t exe_path[MAX_PATH];
+                    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+                    std::wstring exe_dir = exe_path;
+                    size_t last_sep = exe_dir.find_last_of(L"\\/");
+                    if (last_sep != std::wstring::npos) {
+                        exe_dir = exe_dir.substr(0, last_sep);
+                    }
+                    user_data_dir = exe_dir + L"\\webview2-data";
                 }
-                user_data_dir = exe_dir + L"\\webview2-data";
             }
         }
     }
@@ -233,6 +241,8 @@ bool WebViewClient::create_webview() {
                             }
                         ).Get(),
                         nullptr);
+                    // 标记就绪(在 Navigate 之前,避免 ready_ 永远为 false 导致 initialize 超时)
+                    ready_.store(true);
                     // 导航到 GitHub API 建立合法 https origin
                     webview_->Navigate(L"https://api.github.com");
                 }
@@ -329,7 +339,7 @@ void WebViewClient::shutdown() {
     }
 }
 
-// === 同步 GET ===
+// === 同步 GET(Navigate 模式,与 arXiv 单一技术栈一致) ===
 
 HttpResponse WebViewClient::get(const std::string& url,
                                 const std::map<std::string, std::string>& headers) {
@@ -339,15 +349,74 @@ HttpResponse WebViewClient::get(const std::string& url,
         return response;
     }
 
+    // 单一技术栈:Navigate + ExecuteScript(与 arXiv/HN 等源完全一致)
+    // 1. Navigate 到 API URL(api.github.com 返回 JSON,浏览器渲染为 <pre>)
+    // 2. 等待 NavigationCompleted
+    // 3. ExecuteScript 读取 document.body.innerText(获取 JSON 文本)
+    // 不使用 fetch/XHR(ExecuteScript 不 await Promise,同步 XHR 被 Chromium 限制)
+
+    // 重置导航状态
+    nav_completed_.store(false);
+
+    // 1. Navigate
+    std::wstring wurl = to_wstring(url);
+    HRESULT hr = webview_->Navigate(wurl.c_str());
+    if (FAILED(hr)) {
+        response.body = "Navigate failed: 0x" + std::to_string(static_cast<unsigned long>(hr));
+        return response;
+    }
+
+    // 2. 等待 NavigationCompleted(pump 消息循环)
+    auto start = std::chrono::steady_clock::now();
+    while (!nav_completed_.load()) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count() > timeout_seconds_) {
+            response.body = "network error: navigation timeout";
+            return response;
+        }
+        Sleep(5);
+    }
+
+    // 3. ExecuteScript 读取页面内容
+    // api.github.com 返回 JSON,浏览器以 <pre> 标签渲染
+    // document.body.innerText 能拿到 JSON 文本
     completed_ = false;
     fetch_success_ = false;
     fetch_result_.clear();
-    fetch_error_.clear();
 
-    execute_fetch(url, headers);
+    std::string js = "(function(){ return document.body.innerText; })()";
+    std::wstring wjs = to_wstring(js);
 
-    // pump 消息循环直到完成或超时
-    auto start = std::chrono::steady_clock::now();
+    hr = webview_->ExecuteScript(
+        wjs.c_str(),
+        Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+            [this](HRESULT exec_hr, LPCWSTR json_result) -> HRESULT {
+                if (SUCCEEDED(exec_hr) && json_result) {
+                    fetch_result_ = to_utf8(json_result);
+                    fetch_success_ = true;
+                } else {
+                    fetch_error_ = "ExecuteScript HRESULT 0x" +
+                                   std::to_string(static_cast<unsigned long>(exec_hr));
+                }
+                completed_ = true;
+                cv_.notify_one();
+                return S_OK;
+            }
+        ).Get()
+    );
+    if (FAILED(hr)) {
+        response.body = "ExecuteScript dispatch failed: 0x" +
+                        std::to_string(static_cast<unsigned long>(hr));
+        return response;
+    }
+
+    // pump 消息循环等待 ExecuteScript 完成
+    start = std::chrono::steady_clock::now();
     while (!completed_.load()) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -356,7 +425,7 @@ HttpResponse WebViewClient::get(const std::string& url,
         }
         if (std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start).count() > timeout_seconds_) {
-            response.body = "network error: timeout";
+            response.body = "network error: ExecuteScript timeout";
             return response;
         }
         Sleep(5);
@@ -367,37 +436,40 @@ HttpResponse WebViewClient::get(const std::string& url,
         return response;
     }
 
-    // 解析 fetch_result_(JS 返回的 JSON 字符串)
-    // 注意:ExecuteScript 返回值是被 JSON 编码过的字符串
-    // 即 JS 返回 {status:200,body:"...",headers:{...}} 时,
-    // ExecuteScript 回调收到的是 "{\"status\":200,\"body\":\"...\"}"
-    // 也就是说,回调收到的 json_result 本身就是合法 JSON,直接 parse 即可
+    // 解析 ExecuteScript 返回值
+    // ExecuteScript 对 JS 字符串返回值会再 JSON 编码一次(加引号 + 转义)
+    // 所以 fetch_result_ 是 "\"{ ... }\"" 形式,需要先 parse 外层字符串
     try {
         json j = json::parse(fetch_result_);
-        if (j.contains("status")) {
-            response.status_code = j["status"].get<int>();
+        if (j.is_string()) {
+            // 外层是 JSON 字符串,取出内层文本
+            response.body = j.get<std::string>();
+        } else {
+            // 直接是对象(不太可能,但处理一下)
+            response.body = j.dump();
         }
-        if (j.contains("body")) {
-            response.body = j["body"].get<std::string>();
-        }
-        if (j.contains("headers") && j["headers"].is_object()) {
-            for (auto it = j["headers"].begin(); it != j["headers"].end(); ++it) {
-                response.headers[to_lower(it.key())] = it.value().get<std::string>();
+        // api.github.com 成功返回 200,body 是合法 JSON
+        // 如果 body 包含 "message" 且有 "documentation_url",通常是错误响应
+        try {
+            json body_json = json::parse(response.body);
+            if (body_json.contains("message") && body_json.contains("documentation_url")) {
+                response.status_code = 403;  // rate limit or error
+            } else {
+                response.status_code = 200;
             }
-        }
-        if (j.contains("error")) {
-            response.body = "fetch error: " + j["error"].get<std::string>();
-            return response;
+        } catch (...) {
+            response.status_code = 200;  // 非 JSON body,假设成功
         }
     } catch (const std::exception& e) {
-        response.body = std::string("invalid response from fetch: ") + e.what();
+        response.body = std::string("invalid response: ") + e.what() +
+                        " raw=" + fetch_result_.substr(0, 200);
         return response;
     }
 
     return response;
 }
 
-// === 执行 JS fetch ===
+// === 执行 JS fetch(已弃用,保留接口兼容) ===
 
 HttpResponse WebViewClient::execute_fetch(const std::string& url,
                                           const std::map<std::string, std::string>& headers) {
@@ -410,22 +482,32 @@ HttpResponse WebViewClient::execute_fetch(const std::string& url,
         headers_json[k] = v;
     }
 
-    // 构建 JS fetch 调用
-    // 返回值是 JSON 字符串,包含 status/body/headers 或 error
+    // 构建 JS 调用:同步 XMLHttpRequest(WebView2 ExecuteScript 对 async/Promise 返回值不可靠)
+    // 同步 XHR 会阻塞 JS 执行直到响应到达,然后 return 字符串给 ExecuteScript 回调
+    // 注意:Chromium 仍支持同步 XHR(仅 main thread),返回字符串会被 WebView2 再 JSON 编码一次
     std::string js =
-        "(async () => {"
+        "(function(){"
         "  try {"
-        "    const resp = await fetch(" + url_json.dump() + ", {"
-        "      method: 'GET',"
-        "      headers: " + headers_json.dump() + ","
-        "      credentials: 'omit'"
-        "    });"
-        "    const text = await resp.text();"
-        "    const headers = {};"
-        "    resp.headers.forEach((v, k) => { headers[k] = v; });"
-        "    return JSON.stringify({ status: resp.status, body: text, headers: headers });"
+        "    var xhr = new XMLHttpRequest();"
+        "    xhr.open('GET', " + url_json.dump() + ", false);"  // false = 同步
+        "    var hdrs = " + headers_json.dump() + ";"
+        "    for (var k in hdrs) { if (hdrs.hasOwnProperty(k)) xhr.setRequestHeader(k, hdrs[k]); }"
+        "    xhr.send(null);"
+        "    var respHeaders = {};"
+        "    var allHeaders = xhr.getAllResponseHeaders() || '';"
+        "    var lines = allHeaders.split('\\r\\n');"
+        "    for (var i = 0; i < lines.length; i++) {"
+        "      var idx = lines[i].indexOf(':');"
+        "      if (idx > 0) {"
+        "        var key = lines[i].substring(0, idx).replace(/^\\s+|\\s+$/g, '').toLowerCase();"
+        "        var val = lines[i].substring(idx + 1).replace(/^\\s+|\\s+$/g, '');"
+        "        respHeaders[key] = val;"
+        "      }"
+        "    }"
+        "    var result = { status: xhr.status, body: xhr.responseText, headers: respHeaders, dbg: 'xhr_ok' };"
+        "    return JSON.stringify(result);"
         "  } catch (e) {"
-        "    return JSON.stringify({ error: e.message });"
+        "    return JSON.stringify({ error: String(e && e.message ? e.message : e), dbg: 'xhr_catch' });"
         "  }"
         "})()";
 

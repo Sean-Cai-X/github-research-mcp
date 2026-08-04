@@ -7,7 +7,6 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include "webview_client.hpp"
-#include "winhttp_client.hpp"
 #include "errors.hpp"
 
 namespace github_research {
@@ -17,6 +16,7 @@ using json = nlohmann::json;
 // GitHub REST API 客户端
 // 迁移自 DeerFlow skills/public/github-deep-research/scripts/github_api.py
 // 保留所有方法语义与返回 JSON 字段名不变,仅改语言与 HTTP 后端(WebView2)
+// 技术栈统一:整个项目仅使用 WebView2,无 HTTP API fallback
 class GitHubClient {
 public:
     explicit GitHubClient(std::optional<std::string> token = std::nullopt,
@@ -103,8 +103,7 @@ public:
     bool is_ready() const { return http_client_.is_ready(); }
 
     // 设置代理(必须在首次请求前调用)
-    // WebView2 模式:传递给 Chromium --proxy-server
-    // WinHTTP 模式:读取环境变量 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY
+    // 传递给 Chromium --proxy-server(单一技术栈:仅 WebView2)
     void set_proxy(const std::string& proxy_url) {
         proxy_url_ = proxy_url;
         if (!proxy_url.empty()) {
@@ -112,16 +111,20 @@ public:
         }
     }
 
-    // 当前使用的后端名称("webview2" 或 "winhttp")
-    std::string backend_name() const {
-        return use_winhttp_fallback_ ? "winhttp" : "webview2";
+    // 设置独立 user data dir(必须在首次请求前调用)
+    // 用于 8 源会话隔离,避免 GitHub 后端与其他源共用默认路径导致 0x800700aa
+    void set_user_data_dir(const std::string& dir) {
+        http_client_.set_user_data_dir(dir);
     }
 
-    // 首次请求前确保 HTTP 后端已就绪
-    // 优先尝试 WebView2,失败则自动 fallback 到 WinHTTP
-    // 返回 false 表示两个后端都不可用(极少见)
+    // 当前使用的后端名称(恒为 "webview2",单一技术栈)
+    std::string backend_name() const {
+        return "webview2";
+    }
+
+    // 首次请求前确保 WebView2 后端已就绪
+    // 返回 false 表示 WebView2 不可用(Edge Runtime 缺失或环境创建失败)
     bool ensure_ready() {
-        if (use_winhttp_fallback_) return true;  // WinHTTP 无需初始化
         if (http_client_.is_ready()) return true;
 
         std::cerr << "[github] initializing WebView2 backend..." << std::endl;
@@ -130,13 +133,9 @@ public:
             return true;
         }
 
-        // WebView2 失败,fallback 到 WinHTTP
-        std::cerr << "[github] WARNING: WebView2 init failed, falling back to WinHTTP" << std::endl;
-        std::cerr << "[github] NOTE: WinHTTP lacks browser fingerprint, anti-scraping weaker" << std::endl;
-        use_winhttp_fallback_ = true;
-        winhttp_client_ = std::make_unique<WinHttpClient>(
-            "Deep-Research-Bot/1.0", timeout_seconds_, true);
-        return true;
+        std::cerr << "[github] ERROR: WebView2 init failed (no fallback, single tech stack)"
+                  << std::endl;
+        return false;
     }
 
 private:
@@ -158,8 +157,6 @@ private:
                                  const std::map<std::string, std::string>& params = {});
 
     WebViewClient http_client_;
-    std::unique_ptr<WinHttpClient> winhttp_client_;
-    bool use_winhttp_fallback_ = false;
     int timeout_seconds_ = 30;
     std::string proxy_url_;
     std::map<std::string, std::string> headers_;
