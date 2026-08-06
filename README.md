@@ -269,7 +269,23 @@ hn_story:49186720 ─[mentions]─→ arxiv_paper:2510.01395 ─[authored_by]─
        └─[discussed_in]─→ hn_comment   └─[cited_by]─→ s2_paper:...
 ```
 
-## 环境要求
+## 二进制程序下载(无需自行编译)
+
+打 tag 推送后,GitHub Actions 云端自动编译并发布到 Release。直接下载即用,静态链接 MSVC CRT,纯净 Windows 10/11 x64 机器无需另装 VC++ 运行库。
+
+1. 前往 [Releases](../../releases) 页面
+2. 下载 `research-mcp-windows-x64.zip`
+3. 解压后直接运行 `research-mcp.exe`(zip 内已附带 `WebView2Loader.dll`)
+
+启动示例(解压目录下):
+
+```powershell
+.\research-mcp.exe --port 8765 --proxy http://127.0.0.1:7897
+```
+
+> 目标机器仍需自带 Edge Runtime(Win10/11 默认已有)。如需 8 源全量模式,参见下文「启动」章节的 `--xxx-profile` 参数。
+
+## 环境要求(自行编译时)
 
 - Windows 10/11 x64
 - Edge Runtime(Win10/11 自带)
