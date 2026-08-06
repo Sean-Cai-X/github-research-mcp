@@ -172,27 +172,213 @@ bool McpServer::init_hackernews(const std::wstring& userDataDir, const std::stri
 void McpServer::shutdown_hackernews() { shutdown_session(hn_session_, "HackerNews"); }
 
 bool McpServer::init_package(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(pkg_session_, userDataDir, proxy_url, "Package");
+    bool ok = init_session(pkg_session_, userDataDir, proxy_url, "Package");
+    if (ok) {
+        // 注册 npm + pypi 两个数据源 + source_fetch 回调
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("npm_registry", "api", "https://registry.npmjs.org",
+                            0.85, 300, 100000, 0.8, "{}");
+        cm.register_source("pypi_registry", "api", "https://pypi.org",
+                            0.85, 300, 100000, 0.8, "{}");
+        WebViewSession* session_ptr = pkg_session_.get();
+        // npm 回调:entity_key = 包名(不含 registry 前缀)
+        cm.register_source_fetch("npm_registry",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("pkg session not initialized");
+                json args = {{"registry", "npm"}, {"name", entity_key}};
+                json result = ToolPkgFetchDetail(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "npm_registry");
+                        } catch (...) {
+                            throw std::runtime_error("npm fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("npm fetch: empty result");
+            });
+        // pypi 回调
+        cm.register_source_fetch("pypi_registry",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("pkg session not initialized");
+                json args = {{"registry", "pypi"}, {"name", entity_key}};
+                json result = ToolPkgFetchDetail(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "pypi_registry");
+                        } catch (...) {
+                            throw std::runtime_error("pypi fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("pypi fetch: empty result");
+            });
+        log("pkg source_fetch callback registered (npm + pypi)");
+    }
+    return ok;
 }
 void McpServer::shutdown_package() { shutdown_session(pkg_session_, "Package"); }
 
 bool McpServer::init_paperswithcode(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(pwc_session_, userDataDir, proxy_url, "PapersWithCode");
+    bool ok = init_session(pwc_session_, userDataDir, proxy_url, "PapersWithCode");
+    if (ok) {
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("pwc_web", "web_scrape", "https://paperswithcode.com",
+                            0.85, 1500, 100, 0.9, "{}");
+        WebViewSession* session_ptr = pwc_session_.get();
+        cm.register_source_fetch("pwc_web",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("pwc session not initialized");
+                json args = {{"paper_id", entity_key}};
+                json result = ToolPwcFetchPaperDetail(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "pwc_web");
+                        } catch (...) {
+                            throw std::runtime_error("pwc fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("pwc fetch: empty result");
+            });
+        log("pwc source_fetch callback registered");
+    }
+    return ok;
 }
 void McpServer::shutdown_paperswithcode() { shutdown_session(pwc_session_, "PapersWithCode"); }
 
 bool McpServer::init_huggingface(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(hf_session_, userDataDir, proxy_url, "HuggingFace");
+    bool ok = init_session(hf_session_, userDataDir, proxy_url, "HuggingFace");
+    if (ok) {
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("hf_web", "web_scrape", "https://huggingface.co",
+                            0.85, 1200, 200, 0.9, "{}");
+        WebViewSession* session_ptr = hf_session_.get();
+        // model 回调:entity_key = model_id(如 "bert-base-uncased")
+        cm.register_source_fetch("hf_web",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("hf session not initialized");
+                // 若 entity_key 以 "dataset:" 开头,走 dataset 回调,否则走 model
+                json args;
+                if (entity_key.rfind("dataset:", 0) == 0) {
+                    args = {{"dataset_id", entity_key.substr(8)}};
+                    json result = ToolHfFetchDatasetDetail(*session_ptr, args);
+                    if (result.contains("content") && result["content"].is_array() &&
+                        !result["content"].empty()) {
+                        const json& content = result["content"][0];
+                        if (content.contains("text") && content["text"].is_string()) {
+                            try {
+                                json payload = json::parse(content["text"].get<std::string>());
+                                CleanerPipeline cleaner;
+                                return cleaner.clean(payload, "hf_web");
+                            } catch (...) {
+                                throw std::runtime_error("hf dataset fetch: payload parse failed");
+                            }
+                        }
+                    }
+                    throw std::runtime_error("hf dataset fetch: empty result");
+                }
+                args = {{"model_id", entity_key}};
+                json result = ToolHfFetchModelDetail(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "hf_web");
+                        } catch (...) {
+                            throw std::runtime_error("hf model fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("hf model fetch: empty result");
+            });
+        log("hf source_fetch callback registered (model + dataset)");
+    }
+    return ok;
 }
 void McpServer::shutdown_huggingface() { shutdown_session(hf_session_, "HuggingFace"); }
 
 bool McpServer::init_semanticscholar(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(s2_session_, userDataDir, proxy_url, "SemanticScholar");
+    bool ok = init_session(s2_session_, userDataDir, proxy_url, "SemanticScholar");
+    if (ok) {
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("s2_web", "web_scrape", "https://www.semanticscholar.org",
+                            0.9, 1500, 100, 1.0, "{}");
+        WebViewSession* session_ptr = s2_session_.get();
+        cm.register_source_fetch("s2_web",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("s2 session not initialized");
+                json args = {{"paper_id", entity_key}};
+                json result = ToolS2FetchPaperDetail(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "s2_web");
+                        } catch (...) {
+                            throw std::runtime_error("s2 fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("s2 fetch: empty result");
+            });
+        log("s2 source_fetch callback registered");
+    }
+    return ok;
 }
 void McpServer::shutdown_semanticscholar() { shutdown_session(s2_session_, "SemanticScholar"); }
 
 bool McpServer::init_stackoverflow(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(so_session_, userDataDir, proxy_url, "StackOverflow");
+    bool ok = init_session(so_session_, userDataDir, proxy_url, "StackOverflow");
+    if (ok) {
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("so_web", "web_scrape", "https://stackoverflow.com",
+                            0.8, 800, 200, 0.8, "{}");
+        WebViewSession* session_ptr = so_session_.get();
+        cm.register_source_fetch("so_web",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("so session not initialized");
+                json args = {{"question_id", entity_key}};
+                json result = ToolSoFetchQuestionDetail(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "so_web");
+                        } catch (...) {
+                            throw std::runtime_error("so fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("so fetch: empty result");
+            });
+        log("so source_fetch callback registered");
+    }
+    return ok;
 }
 void McpServer::shutdown_stackoverflow() { shutdown_session(so_session_, "StackOverflow"); }
 
@@ -256,7 +442,7 @@ json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args)
     return McpError("ERROR: unknown hn tool: " + tool_name);
 }
 
-// ============ Package Registry 工具分发(4 个 pkg_* 工具) ============
+// ============ Package Registry 工具分发(5 个 pkg_* 工具: 4 原始 + 1 分层) ============
 json McpServer::dispatch_pkg_tool(const std::string& tool_name, const json& args) {
     if (!pkg_session_) return McpError("ERROR: Package session not initialized. Start with --pkg-profile <DIR>.");
     try {
@@ -264,13 +450,14 @@ json McpServer::dispatch_pkg_tool(const std::string& tool_name, const json& args
         if (tool_name == "pkg_get_npm_detail")   return ToolPkgGetNpmDetail(*pkg_session_, args);
         if (tool_name == "pkg_search_pypi")     return ToolPkgSearchPypi(*pkg_session_, args);
         if (tool_name == "pkg_get_pypi_detail")  return ToolPkgGetPypiDetail(*pkg_session_, args);
+        if (tool_name == "pkg_fetch_detail")     return ToolPkgFetchDetail(*pkg_session_, args);
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: pkg tool exception: ") + e.what());
     }
     return McpError("ERROR: unknown pkg tool: " + tool_name);
 }
 
-// ============ Papers with Code 工具分发(5 个 pwc_* 工具) ============
+// ============ Papers with Code 工具分发(6 个 pwc_* 工具: 5 原始 + 1 分层) ============
 json McpServer::dispatch_pwc_tool(const std::string& tool_name, const json& args) {
     if (!pwc_session_) return McpError("ERROR: PapersWithCode session not initialized. Start with --pwc-profile <DIR>.");
     try {
@@ -279,13 +466,14 @@ json McpServer::dispatch_pwc_tool(const std::string& tool_name, const json& args
         if (tool_name == "pwc_get_sota")         return ToolPwcGetSota(*pwc_session_, args);
         if (tool_name == "pwc_search_tasks")    return ToolPwcSearchTasks(*pwc_session_, args);
         if (tool_name == "pwc_search_datasets")  return ToolPwcSearchDatasets(*pwc_session_, args);
+        if (tool_name == "pwc_fetch_paper_detail") return ToolPwcFetchPaperDetail(*pwc_session_, args);
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: pwc tool exception: ") + e.what());
     }
     return McpError("ERROR: unknown pwc tool: " + tool_name);
 }
 
-// ============ Hugging Face 工具分发(7 个 hf_* 工具) ============
+// ============ Hugging Face 工具分发(9 个 hf_* 工具: 7 原始 + 2 分层) ============
 json McpServer::dispatch_hf_tool(const std::string& tool_name, const json& args) {
     if (!hf_session_) return McpError("ERROR: HuggingFace session not initialized. Start with --hf-profile <DIR>.");
     try {
@@ -296,13 +484,15 @@ json McpServer::dispatch_hf_tool(const std::string& tool_name, const json& args)
         if (tool_name == "hf_get_dataset_info") return ToolHfGetDatasetInfo(*hf_session_, args);
         if (tool_name == "hf_get_trending_models") return ToolHfGetTrendingModels(*hf_session_, args);
         if (tool_name == "hf_search_spaces")    return ToolHfSearchSpaces(*hf_session_, args);
+        if (tool_name == "hf_fetch_model_detail")   return ToolHfFetchModelDetail(*hf_session_, args);
+        if (tool_name == "hf_fetch_dataset_detail") return ToolHfFetchDatasetDetail(*hf_session_, args);
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: hf tool exception: ") + e.what());
     }
     return McpError("ERROR: unknown hf tool: " + tool_name);
 }
 
-// ============ Semantic Scholar 工具分发(6 个 s2_* 工具) ============
+// ============ Semantic Scholar 工具分发(7 个 s2_* 工具: 6 原始 + 1 分层) ============
 json McpServer::dispatch_s2_tool(const std::string& tool_name, const json& args) {
     if (!s2_session_) return McpError("ERROR: SemanticScholar session not initialized. Start with --s2-profile <DIR>.");
     try {
@@ -312,13 +502,14 @@ json McpServer::dispatch_s2_tool(const std::string& tool_name, const json& args)
         if (tool_name == "s2_get_references")     return ToolS2GetReferences(*s2_session_, args);
         if (tool_name == "s2_get_author_papers")  return ToolS2GetAuthorPapers(*s2_session_, args);
         if (tool_name == "s2_search_author")     return ToolS2SearchAuthor(*s2_session_, args);
+        if (tool_name == "s2_fetch_paper_detail") return ToolS2FetchPaperDetail(*s2_session_, args);
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: s2 tool exception: ") + e.what());
     }
     return McpError("ERROR: unknown s2 tool: " + tool_name);
 }
 
-// ============ Stack Overflow 工具分发(5 个 so_* 工具) ============
+// ============ Stack Overflow 工具分发(6 个 so_* 工具: 5 原始 + 1 分层) ============
 json McpServer::dispatch_so_tool(const std::string& tool_name, const json& args) {
     if (!so_session_) return McpError("ERROR: StackOverflow session not initialized. Start with --so-profile <DIR>.");
     try {
@@ -327,6 +518,7 @@ json McpServer::dispatch_so_tool(const std::string& tool_name, const json& args)
         if (tool_name == "so_get_top_answers")   return ToolSoGetTopAnswers(*so_session_, args);
         if (tool_name == "so_search_by_tags")    return ToolSoSearchByTags(*so_session_, args);
         if (tool_name == "so_get_similar")       return ToolSoGetSimilar(*so_session_, args);
+        if (tool_name == "so_fetch_question_detail") return ToolSoFetchQuestionDetail(*so_session_, args);
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: so tool exception: ") + e.what());
     }
@@ -1093,6 +1285,18 @@ json McpServer::handle_tools_list() {
                     {"required", json::array({"name"})}
                 })}
             },
+            {
+                {"name", "pkg_fetch_detail"},
+                {"description", "Fetch package detail with cache (TTL=24h) + entity_mapper. Supports npm and pypi registries. Returns cache_hit=true on second call."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"registry", json::object({{"type","string"},{"enum",json::array({"npm","pypi"})},{"default","npm"}})},
+                        {"name", json::object({{"type","string"},{"description","Package name"}})}
+                    })},
+                    {"required", json::array({"name"})}
+                })}
+            },
             // ========== Papers with Code 工具集(5 个 pwc_*) ==========
             {
                 {"name", "pwc_search_papers"},
@@ -1150,6 +1354,17 @@ json McpServer::handle_tools_list() {
                         {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
                     })},
                     {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "pwc_fetch_paper_detail"},
+                {"description", "Fetch PwC paper detail with cache (TTL=72h) + entity_mapper. Auto-registers paper entity + pwc_stars metric."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"paper_id", json::object({{"type","string"},{"description","Papers with Code paper slug/id"}})}
+                    })},
+                    {"required", json::array({"paper_id"})}
                 })}
             },
             // ========== Hugging Face 工具集(7 个 hf_*) ==========
@@ -1236,6 +1451,28 @@ json McpServer::handle_tools_list() {
                     {"required", json::array({"query"})}
                 })}
             },
+            {
+                {"name", "hf_fetch_model_detail"},
+                {"description", "Fetch HF model detail with cache (TTL=12h) + entity_mapper. Auto-registers model entity + hf_observed metric."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"model_id", json::object({{"type","string"},{"description","HF model id, e.g. 'bert-base-uncased'"}})}
+                    })},
+                    {"required", json::array({"model_id"})}
+                })}
+            },
+            {
+                {"name", "hf_fetch_dataset_detail"},
+                {"description", "Fetch HF dataset detail with cache (TTL=24h) + entity_mapper. Auto-registers dataset entity."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"dataset_id", json::object({{"type","string"},{"description","HF dataset id"}})}
+                    })},
+                    {"required", json::array({"dataset_id"})}
+                })}
+            },
             // ========== Semantic Scholar 工具集(6 个 s2_*) ==========
             {
                 {"name", "s2_search_papers"},
@@ -1309,6 +1546,17 @@ json McpServer::handle_tools_list() {
                     {"required", json::array({"name"})}
                 })}
             },
+            {
+                {"name", "s2_fetch_paper_detail"},
+                {"description", "Fetch Semantic Scholar paper detail with cache (TTL=72h) + entity_mapper. Supports DOI/corpus ID/arXiv ID."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"paper_id", json::object({{"type","string"},{"description","Paper id: DOI / corpus ID / arXiv ID"}})}
+                    })},
+                    {"required", json::array({"paper_id"})}
+                })}
+            },
             // ========== Stack Overflow 工具集(5 个 so_*) ==========
             {
                 {"name", "so_search_questions"},
@@ -1369,6 +1617,17 @@ json McpServer::handle_tools_list() {
                         {"count", json::object({{"type","integer"},{"default",5},{"minimum",1},{"maximum",30}})}
                     })},
                     {"required", json::array({"title"})}
+                })}
+            },
+            {
+                {"name", "so_fetch_question_detail"},
+                {"description", "Fetch SO question detail with cache (TTL=24h) + entity_mapper. Auto-registers question entity + so_observed metric."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"question_id", json::object({{"type","integer"},{"description","Stack Overflow question id"}})}
+                    })},
+                    {"required", json::array({"question_id"})}
                 })}
             }
         })}

@@ -754,6 +754,313 @@ int main(int argc, char* argv[]) {
         auto story_ts = cm.query_timeseries(story_eid, "comment_count");
         check("hn story metric timeseries", !story_ts.empty());
 
+        // ═══════════════════════════════════════════════════════════
+        //  L7 6 源扩展接入 smoke (npm/pypi/pwc/hf/s2/so)
+        //    验证:缓存读写 + entity_mapper + register_entity_source + metric
+        // ═══════════════════════════════════════════════════════════
+
+        // ── 58. pkg/npm 缓存(TTL=24h) ──
+        cm.put("pkg", "pkg:npm:react", R"({"name":"react","version":"18.2.0"})", "json", 24, "", "ok", "");
+        auto pkg_npm = cm.get("pkg", "pkg:npm:react");
+        check("pkg npm cache stored", pkg_npm.has_value());
+        check("pkg npm cache status",
+              pkg_npm && pkg_npm->fetch_status == "ok");
+        check("pkg npm cache payload contains react",
+              pkg_npm && pkg_npm->payload.find("react") != std::string::npos);
+
+        // ── 59. pkg/pypi 缓存 ──
+        cm.put("pkg", "pkg:pypi:numpy", R"({"name":"numpy","version":"1.26.0"})", "json", 24, "", "ok", "");
+        auto pkg_pypi = cm.get("pkg", "pkg:pypi:numpy");
+        check("pkg pypi cache stored", pkg_pypi.has_value());
+        check("pkg pypi cache is_fresh", cm.is_fresh("pkg", "pkg:pypi:numpy"));
+
+        // ── 60. pkg npm 失败缓存 ──
+        cm.put("pkg", "pkg:npm:nonexistent-pkg-xyz", "", "json", 1, "", "failed", "404");
+        auto pkg_fail = cm.get("pkg", "pkg:npm:nonexistent-pkg-xyz");
+        check("pkg npm failed cache stored", pkg_fail.has_value());
+        check("pkg npm failed cache status",
+              pkg_fail && pkg_fail->fetch_status == "failed");
+
+        // ── 61. package 实体(npm) ──
+        std::string pkg_eid_react = cm.register_entity(
+            "package", "npm:react",
+            {"react"}, {"npm", "package"},
+            {{"registry", "npm"}, {"version", "18.2.0"}},
+            "React library"
+        );
+        check("pkg npm entity registered", !pkg_eid_react.empty());
+        check("pkg npm entity stable",
+              cm.register_entity("package", "npm:react") == pkg_eid_react);
+        cm.register_entity_source(pkg_eid_react, "npm_registry", "react",
+                                  {"name", "version", "description"}, 0.85);
+        cm.record_metric(pkg_eid_react, "version_observed", 1.0, "npm");
+
+        // ── 62. package 实体(pypi) ──
+        std::string pkg_eid_numpy = cm.register_entity(
+            "package", "pypi:numpy",
+            {"numpy"}, {"pypi", "package"},
+            {{"registry", "pypi"}, {"version", "1.26.0"}},
+            "NumPy"
+        );
+        check("pkg pypi entity registered", !pkg_eid_numpy.empty());
+        cm.register_entity_source(pkg_eid_numpy, "pypi_registry", "numpy",
+                                  {"name", "version"}, 0.85);
+
+        // ── 63. pwc 缓存(TTL=72h) ──
+        cm.put("pwc", "pwc:some-paper-slug",
+               R"({"paper_id":"some-paper-slug","title":"Sample Paper"})",
+               "json", 72, "", "ok", "");
+        auto pwc_cached = cm.get("pwc", "pwc:some-paper-slug");
+        check("pwc cache stored", pwc_cached.has_value());
+        check("pwc cache status ok",
+              pwc_cached && pwc_cached->fetch_status == "ok");
+
+        // ── 64. pwc paper 实体 ──
+        std::string pwc_paper_eid = cm.register_entity(
+            "paper", "pwc:some-paper-slug",
+            {"Sample Paper"}, {"paperswithcode"},
+            {{"paper_id", "some-paper-slug"}},
+            "Sample Paper"
+        );
+        check("pwc paper entity registered", !pwc_paper_eid.empty());
+        cm.register_entity_source(pwc_paper_eid, "pwc_web", "some-paper-slug",
+                                  {"title", "abstract", "code_link"}, 0.85);
+        cm.record_metric(pwc_paper_eid, "pwc_stars", 1.0, "pwc");
+
+        // ── 65. hf model 缓存(TTL=12h) ──
+        cm.put("hf", "hf:model:bert-base-uncased",
+               R"({"model_id":"bert-base-uncased","title":"BERT Base Uncased"})",
+               "json", 12, "", "ok", "");
+        auto hf_model = cm.get("hf", "hf:model:bert-base-uncased");
+        check("hf model cache stored", hf_model.has_value());
+        check("hf model cache is_fresh", cm.is_fresh("hf", "hf:model:bert-base-uncased"));
+
+        // ── 66. hf dataset 缓存(TTL=24h) ──
+        cm.put("hf", "hf:dataset:squad",
+               R"({"dataset_id":"squad","title":"SQuAD"})",
+               "json", 24, "", "ok", "");
+        auto hf_ds = cm.get("hf", "hf:dataset:squad");
+        check("hf dataset cache stored", hf_ds.has_value());
+
+        // ── 67. hf model 实体 ──
+        std::string hf_model_eid = cm.register_entity(
+            "model", "hf:bert-base-uncased",
+            {"BERT Base Uncased", "bert-base-uncased"}, {"huggingface"},
+            {{"model_id", "bert-base-uncased"}},
+            "BERT Base Uncased"
+        );
+        check("hf model entity registered", !hf_model_eid.empty());
+        cm.register_entity_source(hf_model_eid, "hf_web", "bert-base-uncased",
+                                  {"title", "downloads", "likes"}, 0.85);
+        cm.record_metric(hf_model_eid, "hf_observed", 1.0, "hf");
+
+        // ── 68. hf dataset 实体 ──
+        std::string hf_ds_eid = cm.register_entity(
+            "dataset", "hf:squad",
+            {"SQuAD", "squad"}, {"huggingface"},
+            {{"dataset_id", "squad"}},
+            "SQuAD"
+        );
+        check("hf dataset entity registered", !hf_ds_eid.empty());
+
+        // ── 69. s2 缓存(TTL=72h) ──
+        cm.put("s2", "s2:10.1000/test",
+               R"({"paper_id":"10.1000/test","title":"Test Paper"})",
+               "json", 72, "", "ok", "");
+        auto s2_cached = cm.get("s2", "s2:10.1000/test");
+        check("s2 cache stored", s2_cached.has_value());
+        check("s2 cache status ok",
+              s2_cached && s2_cached->fetch_status == "ok");
+
+        // ── 70. s2 paper 实体 ──
+        std::string s2_paper_eid = cm.register_entity(
+            "paper", "s2:10.1000/test",
+            {"Test Paper"}, {"semanticscholar"},
+            {{"paper_id", "10.1000/test"}},
+            "Test Paper"
+        );
+        check("s2 paper entity registered", !s2_paper_eid.empty());
+        cm.register_entity_source(s2_paper_eid, "s2_web", "10.1000/test",
+                                  {"title", "abstract", "citations"}, 0.9);
+        cm.record_metric(s2_paper_eid, "s2_citations_observed", 1.0, "s2");
+
+        // ── 71. so 缓存(TTL=24h) ──
+        cm.put("so", "so:question:12345678",
+               R"({"question_id":"12345678","title":"How to parse JSON in C++"})",
+               "json", 24, "", "ok", "");
+        auto so_cached = cm.get("so", "so:question:12345678");
+        check("so cache stored", so_cached.has_value());
+        check("so cache status ok",
+              so_cached && so_cached->fetch_status == "ok");
+
+        // ── 72. so question 实体 ──
+        std::string so_q_eid = cm.register_entity(
+            "question", "so:12345678",
+            {"How to parse JSON in C++"}, {"stackoverflow"},
+            {{"question_id", "12345678"}},
+            "How to parse JSON in C++"
+        );
+        check("so question entity registered", !so_q_eid.empty());
+        cm.register_entity_source(so_q_eid, "so_web", "12345678",
+                                  {"title", "score", "view_count"}, 0.85);
+        cm.record_metric(so_q_eid, "so_observed", 1.0, "so");
+
+        // ── 73. 跨实体类型关系: hf model derived_from github project ──
+        cm.add_relation(hf_model_eid, eid_p1, "derived_from", 0.7, "hf_web", "bert-base-uncased");
+        auto derived_rels = cm.query_relations(hf_model_eid, "out", "derived_from", 0.0, 10);
+        check("hf model derived_from github project",
+              !derived_rels.empty() &&
+              derived_rels[0].value("target_entity","") == eid_p1);
+
+        // ── 74. 跨实体类型关系: so question mentions pwc paper ──
+        cm.add_relation(so_q_eid, pwc_paper_eid, "mentions", 0.6, "so_web", "12345678");
+        auto so_mentions = cm.query_relations(so_q_eid, "out", "mentions", 0.0, 10);
+        check("so question mentions pwc paper",
+              !so_mentions.empty() &&
+              so_mentions[0].value("target_entity","") == pwc_paper_eid);
+
+        // ── 75. 6 源各自 register_source 注册 ──
+        cm.register_source("npm_registry", "api", "https://registry.npmjs.org",
+                            0.85, 300, 100000, 0.8, "{}");
+        cm.register_source("pypi_registry", "api", "https://pypi.org",
+                            0.85, 300, 100000, 0.8, "{}");
+        cm.register_source("pwc_web", "web_scrape", "https://paperswithcode.com",
+                            0.85, 1500, 100, 0.9, "{}");
+        cm.register_source("hf_web", "web_scrape", "https://huggingface.co",
+                            0.85, 1200, 200, 0.9, "{}");
+        cm.register_source("s2_web", "web_scrape", "https://www.semanticscholar.org",
+                            0.9, 1500, 100, 1.0, "{}");
+        cm.register_source("so_web", "web_scrape", "https://stackoverflow.com",
+                            0.8, 800, 200, 0.8, "{}");
+
+        auto ds_npm_l7 = cm.get_source("npm_registry");
+        check("npm_registry source registered",
+              ds_npm_l7.has_value() && ds_npm_l7->source_id == "npm_registry");
+        auto ds_pypi = cm.get_source("pypi_registry");
+        check("pypi_registry source registered",
+              ds_pypi.has_value() && ds_pypi->reliability == 0.85);
+        auto ds_pwc = cm.get_source("pwc_web");
+        check("pwc_web source registered",
+              ds_pwc.has_value() && ds_pwc->source_type == "web_scrape");
+        auto ds_hf = cm.get_source("hf_web");
+        check("hf_web source registered",
+              ds_hf.has_value() && ds_hf->avg_latency_ms == 1200);
+        auto ds_s2 = cm.get_source("s2_web");
+        check("s2_web source registered",
+              ds_s2.has_value() && ds_s2->priority_weight == 1.0);
+        auto ds_so = cm.get_source("so_web");
+        check("so_web source registered",
+              ds_so.has_value() && ds_so->reliability == 0.8);
+
+        // ── 76. 6 源失败缓存验证 ──
+        cm.put("pkg", "pkg:npm:fetch-fail-test", "", "json", 1, "", "failed", "timeout");
+        cm.put("pwc", "pwc:fetch-fail-test", "", "json", 1, "", "failed", "404");
+        cm.put("hf", "hf:model:fetch-fail-test", "", "json", 1, "", "failed", "network");
+        cm.put("s2", "s2:fetch-fail-test", "", "json", 1, "", "failed", "timeout");
+        cm.put("so", "so:question:fetch-fail-test", "", "json", 1, "", "failed", "404");
+
+        check("pkg failed cache", cm.get("pkg", "pkg:npm:fetch-fail-test")->fetch_status == "failed");
+        check("pwc failed cache", cm.get("pwc", "pwc:fetch-fail-test")->fetch_status == "failed");
+        check("hf failed cache",  cm.get("hf", "hf:model:fetch-fail-test")->fetch_status == "failed");
+        check("s2 failed cache",  cm.get("s2", "s2:fetch-fail-test")->fetch_status == "failed");
+        check("so failed cache",  cm.get("so", "so:question:fetch-fail-test")->fetch_status == "failed");
+
+        // ── 77. 6 源 register_source_result(熔断器基础) ──
+        cm.record_source_result("npm_registry", true, 200);
+        cm.record_source_result("npm_registry", false);
+        auto ds_npm_after = cm.get_source("npm_registry");
+        check("npm_registry failures incremented",
+              ds_npm_after && ds_npm_after->consecutive_failures == 1);
+
+        cm.record_source_result("pypi_registry", true, 150);
+        auto ds_pypi_after = cm.get_source("pypi_registry");
+        check("pypi_registry success resets failures",
+              ds_pypi_after && ds_pypi_after->consecutive_failures == 0 &&
+              ds_pypi_after->avg_latency_ms == 150);
+
+        // ── 78. 多源融合查询(hf model + github project 同一实体) ──
+        // 模拟:github project 和 hf model 都描述 "bert-base-uncased"
+        cm.put_entity_fields(hf_model_eid, "hf_web",
+                             {{"title", "BERT Base Uncased"},
+                              {"downloads", 1000000}}, 0.85);
+        cm.put_entity_fields(eid_p1, "github_api",
+                             {{"title", "BERT Repo"},
+                              {"stars", 50000}}, 0.9);
+        auto fused_model = cm.get_entity_fields(hf_model_eid);
+        check("hf model fields fused", fused_model.count("title") > 0);
+        auto fused_proj = cm.get_entity_fields(eid_p1);
+        check("github project fields fused", fused_proj.count("title") > 0);
+
+        // ── 79. 降级策略:paper 类型(arxiv -> s2 -> pwc) ──
+        cm.set_fallback_policy("paper",
+            {"arxiv_web", "s2_web", "pwc_web"}, "", 0.3, true, 168);
+        auto paper_chain = cm.get_fallback_chain("paper");
+        check("paper fallback chain size 3", paper_chain.size() == 3);
+        check("paper fallback first arxiv_web",
+              !paper_chain.empty() && paper_chain[0] == "arxiv_web");
+        check("paper fallback second s2_web",
+              paper_chain.size() >= 2 && paper_chain[1] == "s2_web");
+
+        // ── 80. 降级策略:model 类型(hf_web -> github_api) ──
+        cm.set_fallback_policy("model",
+            {"hf_web", "github_api"}, "", 0.3, true, 168);
+        auto model_chain = cm.get_fallback_chain("model");
+        check("model fallback chain size 2", model_chain.size() == 2);
+        check("model fallback first hf_web",
+              !model_chain.empty() && model_chain[0] == "hf_web");
+
+        // ── 81. 降级策略:package 类型(npm -> pypi) ──
+        cm.set_fallback_policy("package",
+            {"npm_registry", "pypi_registry"}, "", 0.3, true, 168);
+        auto pkg_chain = cm.get_fallback_chain("package");
+        check("package fallback chain size 2", pkg_chain.size() == 2);
+        check("package fallback first npm_registry",
+              !pkg_chain.empty() && pkg_chain[0] == "npm_registry");
+
+        // ── 82. 时间序列跨源查询(s2 paper citations_observed) ──
+        auto s2_ts = cm.query_timeseries(s2_paper_eid, "s2_citations_observed");
+        check("s2 paper metric timeseries", !s2_ts.empty());
+        check("s2 paper metric value",
+              !s2_ts.empty() && s2_ts[0].value("metric_value", -1) == 1.0);
+
+        // ── 83. 时间序列 hf model observed ──
+        auto hf_ts = cm.query_timeseries(hf_model_eid, "hf_observed");
+        check("hf model metric timeseries", !hf_ts.empty());
+
+        // ── 84. 时间序列 so question observed ──
+        auto so_ts = cm.query_timeseries(so_q_eid, "so_observed");
+        check("so question metric timeseries", !so_ts.empty());
+
+        // ── 85. 跨源图谱遍历(so question → pwc paper → ...) ──
+        auto so_graph = cm.traverse_graph(so_q_eid, 2, 0.1, 20);
+        int so_graph_levels = so_graph.value("levels", json::array()).size();
+        check("so graph traverse >= 1 level", so_graph_levels >= 1);
+        check("so graph has nodes", !so_graph.value("nodes", json::array()).empty());
+
+        // ── 86. 跨源图谱遍历(hf model → github project → ...) ──
+        auto hf_graph = cm.traverse_graph(hf_model_eid, 2, 0.1, 20);
+        int hf_graph_levels = hf_graph.value("levels", json::array()).size();
+        check("hf graph traverse >= 1 level", hf_graph_levels >= 1);
+
+        // ── 87. stats 汇总(6 源扩展后) ──
+        auto st_extended = cm.stats();
+        int ents_ext = st_extended.value("entity_count", -1);
+        int rels_ext = st_extended.value("relation_count", -1);
+        check("entity_count >= 10 (extended)",
+              ents_ext >= 10);  // 3 baseline + 7 new (react/numpy/pwc/hf_model/hf_ds/s2/so)
+        check("relation_count >= 5 (extended)",
+              rels_ext >= 5);  // baseline 2 + derived_from + mentions
+
+        // ── 88. 6 源 entity find_entity 跨类型查找 ──
+        auto found_react = cm.find_entity("react", "package");
+        check("find_entity react package", !found_react.empty());
+        auto found_bert = cm.find_entity("bert", "model");
+        check("find_entity bert model", !found_bert.empty());
+        auto found_squad = cm.find_entity("squad", "dataset");
+        check("find_entity squad dataset", !found_squad.empty());
+        auto found_so = cm.find_entity("so:12345678", "question");
+        check("find_entity JSON question", !found_so.empty());
+
         std::cerr << "[SMOKE SUMMARY] pass=" << pass << " fail=" << fail << std::endl;
         github_research::CacheManager::instance().shutdown();
         return (fail == 0) ? 0 : 2;

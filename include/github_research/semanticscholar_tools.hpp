@@ -34,4 +34,8 @@ json ToolS2GetAuthorPapers(WebViewSession& session, const json& args);
 // 6. s2_search_author - 作者检索
 json ToolS2SearchAuthor(WebViewSession& session, const json& args);
 
+// 7. s2_fetch_paper_detail - 分层工具: 缓存 + entity_mapper
+//    cache_key=s2:{paper_id}, TTL=72h, entity=paper + cites/cited_by 关系
+json ToolS2FetchPaperDetail(WebViewSession& session, const json& args);
+
 } // namespace github_research

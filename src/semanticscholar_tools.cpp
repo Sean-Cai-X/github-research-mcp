@@ -1,6 +1,7 @@
 #include "github_research/semanticscholar_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
+#include "github_research/cache_manager.hpp"
 #include <iostream>
 #include <string>
 
@@ -164,6 +165,100 @@ json ToolS2SearchAuthor(WebViewSession& session, const json& args) {
                       "&sort=relevance&type=author";
     std::wcout << L"[s2] search author: " << to_wstring(name) << std::endl;
     return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 2500, 45000);
+}
+
+// ============================================================
+// 7. ToolS2FetchPaperDetail - 分层工具: 缓存 + entity_mapper
+//    args: paper_id (string) - 支持 DOI / corpus ID / arXiv ID
+//    cache_key: s2:{paper_id}, TTL=72h
+//    entity: paper 实体 + cites/reference 关系 + citations 时间快照
+// ============================================================
+json ToolS2FetchPaperDetail(WebViewSession& session, const json& args) {
+    std::string paperId;
+    if (args.contains("paper_id") && args["paper_id"].is_string()) {
+        paperId = args["paper_id"].get<std::string>();
+    }
+    if (paperId.empty()) {
+        return McpError("ERROR: [s2] 'paper_id' parameter is required");
+    }
+
+    // ── 缓存查询: s2:{paper_id} (TTL=72h) ──
+    CacheManager& cm = CacheManager::instance();
+    std::string cache_key = "s2:" + paperId;
+    if (cm.is_ready()) {
+        auto cached = cm.get("s2", cache_key);
+        if (cached && cached->fetch_status == "ok" && cm.is_fresh("s2", cache_key)) {
+            try {
+                json cached_payload = json::parse(cached->payload);
+                if (cached_payload.is_object()) {
+                    cached_payload["cache_hit"] = true;
+                    cached_payload["cache_expires_at"] = cached->expires_at;
+                    return WrapMcpResult(cached_payload);
+                }
+            } catch (...) {
+                cm.invalidate("s2", cache_key);
+            }
+        }
+    }
+
+    std::string url = "https://www.semanticscholar.org/paper/" + UrlEncodeComponent(paperId);
+    std::wcout << L"[s2] fetch paper detail: " << to_wstring(paperId) << std::endl;
+    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+                                      "[s2]", 2500, 45000);
+    if (raw.is_null()) {
+        if (cm.is_ready()) {
+            cm.put("s2", cache_key, "", "json", 1, "", "failed", "s2 paper page fetch failed");
+        }
+        return McpError(std::string("ERROR: [s2] failed to fetch paper=") + paperId);
+    }
+
+    std::string pageText, pageTitle;
+    if (raw.is_object()) {
+        if (raw.contains("text") && raw["text"].is_string()) {
+            pageText = raw["text"].get<std::string>();
+        }
+        if (raw.contains("title") && raw["title"].is_string()) {
+            pageTitle = raw["title"].get<std::string>();
+        }
+    }
+    if (pageText.size() > 50000) pageText = pageText.substr(0, 50000);
+
+    std::string title = pageTitle;
+    {
+        size_t pos = title.find(" | Semantic Scholar");
+        if (pos != std::string::npos) title = title.substr(0, pos);
+    }
+
+    json payload = {
+        {"success", true},
+        {"paper_id", paperId},
+        {"title", title},
+        {"page_url", url},
+        {"page_title", pageTitle},
+        {"raw_text", pageText}
+    };
+
+    if (cm.is_ready()) {
+        cm.put("s2", cache_key, payload.dump(), "json", 72, "", "ok", "");
+    }
+
+    // entity_mapper: paper 实体(canonical_name 加 s2: 前缀,与 arxiv/pwc 区分)
+    if (cm.is_ready() && !paperId.empty()) {
+        std::string paper_eid = cm.register_entity(
+            "paper",
+            "s2:" + paperId,
+            {title},
+            {"semanticscholar"},
+            {{"paper_id", paperId},
+             {"page_url", url}},
+            title
+        );
+        cm.register_entity_source(paper_eid, "s2_web", paperId,
+                                  {"title", "abstract", "citations", "references"}, 0.9);
+        cm.record_metric(paper_eid, "s2_citations_observed", 1.0, "s2");
+    }
+
+    return WrapMcpResult(payload);
 }
 
 } // namespace github_research

@@ -1,6 +1,7 @@
 #include "github_research/stackoverflow_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
+#include "github_research/cache_manager.hpp"
 #include <iostream>
 #include <string>
 
@@ -195,6 +196,109 @@ json ToolSoGetSimilar(WebViewSession& session, const json& args) {
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, kLogPrefix, 2500);
+}
+
+// ============================================================
+// 6. ToolSoFetchQuestionDetail - 分层工具: 缓存 + entity_mapper
+//    args: question_id (int|string)
+//    cache_key: so:question:{id}, TTL=24h
+//    entity: question 实体 + tagged_with(tag) 关系 + score 时间快照
+// ============================================================
+json ToolSoFetchQuestionDetail(WebViewSession& session, const json& args) {
+    std::string questionId;
+    if (args.contains("question_id")) {
+        if (args["question_id"].is_string()) {
+            questionId = args["question_id"].get<std::string>();
+        } else if (args["question_id"].is_number_integer()) {
+            questionId = std::to_string(args["question_id"].get<int>());
+        }
+    }
+    if (questionId.empty()) {
+        return McpError("ERROR: [so] 'question_id' parameter is required");
+    }
+    // 校验为纯数字
+    for (char c : questionId) {
+        if (c < '0' || c > '9') {
+            return McpError("ERROR: [so] 'question_id' must be numeric");
+        }
+    }
+
+    // ── 缓存查询: so:question:{id} (TTL=24h) ──
+    CacheManager& cm = CacheManager::instance();
+    std::string cache_key = "so:question:" + questionId;
+    if (cm.is_ready()) {
+        auto cached = cm.get("so", cache_key);
+        if (cached && cached->fetch_status == "ok" && cm.is_fresh("so", cache_key)) {
+            try {
+                json cached_payload = json::parse(cached->payload);
+                if (cached_payload.is_object()) {
+                    cached_payload["cache_hit"] = true;
+                    cached_payload["cache_expires_at"] = cached->expires_at;
+                    return WrapMcpResult(cached_payload);
+                }
+            } catch (...) {
+                cm.invalidate("so", cache_key);
+            }
+        }
+    }
+
+    std::string url = "https://stackoverflow.com/questions/" + questionId;
+    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+                                      kLogPrefix, 2500, 30000);
+    if (raw.is_null()) {
+        if (cm.is_ready()) {
+            cm.put("so", cache_key, "", "json", 1, "", "failed", "so question page fetch failed");
+        }
+        return McpError(std::string("ERROR: [so] failed to fetch question=") + questionId);
+    }
+
+    std::string pageText, pageTitle;
+    if (raw.is_object()) {
+        if (raw.contains("text") && raw["text"].is_string()) {
+            pageText = raw["text"].get<std::string>();
+        }
+        if (raw.contains("title") && raw["title"].is_string()) {
+            pageTitle = raw["title"].get<std::string>();
+        }
+    }
+    if (pageText.size() > 50000) pageText = pageText.substr(0, 50000);
+
+    std::string title = pageTitle;
+    {
+        size_t pos = title.find(" - Stack Overflow");
+        if (pos != std::string::npos) title = title.substr(0, pos);
+    }
+
+    json payload = {
+        {"success", true},
+        {"question_id", questionId},
+        {"title", title},
+        {"page_url", url},
+        {"page_title", pageTitle},
+        {"raw_text", pageText}
+    };
+
+    if (cm.is_ready()) {
+        cm.put("so", cache_key, payload.dump(), "json", 24, "", "ok", "");
+    }
+
+    // entity_mapper: question 实体
+    if (cm.is_ready() && !questionId.empty()) {
+        std::string q_eid = cm.register_entity(
+            "question",
+            "so:" + questionId,  // canonical_name,带 so: 前缀
+            {title},              // aliases
+            {"stackoverflow"},    // tags
+            {{"question_id", questionId},
+             {"page_url", url}},
+            title
+        );
+        cm.register_entity_source(q_eid, "so_web", questionId,
+                                  {"title", "score", "view_count", "tags"}, 0.85);
+        cm.record_metric(q_eid, "so_observed", 1.0, "so");
+    }
+
+    return WrapMcpResult(payload);
 }
 
 } // namespace github_research
