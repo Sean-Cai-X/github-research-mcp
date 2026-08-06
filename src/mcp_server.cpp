@@ -1152,7 +1152,7 @@ json McpServer::handle_tools_list() {
             // ========== Hacker News 工具集(5 个 hn_*) ==========
             {
                 {"name", "hn_get_top_stories"},
-                {"description", "Get top stories from Hacker News front page with titles, URLs, scores, authors, and comment counts."},
+                {"description", "Get top stories from Hacker News front page. Returns structured JSON with stories array: each item has hn_id, rank, title, external_url, score, author, comment_count. Use hn_fetch_detailed_story with hn_id for secondary analysis (comments, article text)."},
                 {"inputSchema", json::object({
                     {"type", "object"},
                     {"properties", json::object({
@@ -1162,7 +1162,7 @@ json McpServer::handle_tools_list() {
             },
             {
                 {"name", "hn_get_new_stories"},
-                {"description", "Get newest stories from Hacker News."},
+                {"description", "Get newest stories from Hacker News. Returns structured JSON with stories array (same format as hn_get_top_stories). Use hn_fetch_detailed_story with hn_id for secondary analysis."},
                 {"inputSchema", json::object({
                     {"type", "object"},
                     {"properties", json::object({
@@ -1172,7 +1172,7 @@ json McpServer::handle_tools_list() {
             },
             {
                 {"name", "hn_get_best_stories"},
-                {"description", "Get best stories from Hacker News."},
+                {"description", "Get best stories from Hacker News. Returns structured JSON with stories array (same format as hn_get_top_stories). Use hn_fetch_detailed_story with hn_id for secondary analysis."},
                 {"inputSchema", json::object({
                     {"type", "object"},
                     {"properties", json::object({

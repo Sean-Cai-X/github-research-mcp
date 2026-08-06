@@ -19,7 +19,7 @@ namespace {
 constexpr const char* kLogPrefix = "[hn]";
 
 // HN 首页索引提取 JS:解析 tr.athing 行,返回结构化数组
-// 字段: hn_id, rank, title, external_url, score, created_min_ago, has_discussion
+// 字段: hn_id, rank, title, external_url, score, author, created_min_ago, comment_count, hn_item_url
 constexpr const char* kJsHnIndexList = R"(
 (function(){
   var items = [];
@@ -38,8 +38,10 @@ constexpr const char* kJsHnIndexList = R"(
       if (m) rank = parseInt(m[1]);
     }
     var score = 0;
+    var author = '';
     var age = '';
-    var hasDiscussion = false;
+    var commentCount = 0;
+    var hnItemUrl = '';
     var subtext = null;
     var next = row.nextElementSibling;
     while (next) {
@@ -57,7 +59,20 @@ constexpr const char* kJsHnIndexList = R"(
       var ageEl = subtext.querySelector('.age');
       if (ageEl) {
         age = ageEl.textContent || '';
-        hasDiscussion = true;
+      }
+      var userEl = subtext.querySelector('.hnuser');
+      if (userEl) {
+        author = userEl.textContent || '';
+      }
+      var allLinks = subtext.querySelectorAll('a');
+      for (var j = 0; j < allLinks.length; j++) {
+        var href = allLinks[j].getAttribute('href') || '';
+        if (href.indexOf('item?id=') >= 0) {
+          hnItemUrl = href;
+          var cm = allLinks[j].textContent.match(/(\d+)/);
+          if (cm) commentCount = parseInt(cm[1]);
+          break;
+        }
       }
     }
     items.push({
@@ -66,8 +81,10 @@ constexpr const char* kJsHnIndexList = R"(
       title: title,
       external_url: url,
       score: score,
+      author: author,
       created_min_ago: age,
-      has_discussion: hasDiscussion
+      comment_count: commentCount,
+      hn_item_url: hnItemUrl
     });
   }
   return JSON.stringify(items);
@@ -133,12 +150,38 @@ json ToolHnGetTopStories(WebViewSession& session, const json& args) {
     if (count > 100) count = 100;
 
     std::wstring url = L"https://news.ycombinator.com/";
-    json result = NavigateAndExecute(session, url, kJsExtractRawPage, "[hn]", 2000, 30000);
+    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
 
-    // 如果请求的 count 小于返回数量,在 text 中截断
-    // 此处保持简单:整页返回,count 仅作参考参数
-    (void)count;
-    return result;
+    json stories = json::array();
+    if (raw.is_string()) {
+        try {
+            stories = json::parse(raw.get<std::string>());
+        } catch (...) {
+            return McpError("ERROR: [hn] failed to parse top stories JSON");
+        }
+    } else if (raw.is_array()) {
+        stories = raw;
+    } else {
+        return McpError("ERROR: [hn] failed to fetch top stories");
+    }
+
+    // 按 count 截断
+    if ((int)stories.size() > count) {
+        json trimmed = json::array();
+        int idx = 0;
+        for (auto it = stories.begin(); it != stories.end() && idx < count; ++it, ++idx) {
+            trimmed.push_back(*it);
+        }
+        stories = std::move(trimmed);
+    }
+
+    json payload = {
+        {"source", "hackernews"},
+        {"list_type", "top"},
+        {"count", (int)stories.size()},
+        {"stories", stories}
+    };
+    return WrapMcpResult(payload);
 }
 
 // 2. hn_get_new_stories
@@ -151,10 +194,37 @@ json ToolHnGetNewStories(WebViewSession& session, const json& args) {
     if (count > 100) count = 100;
 
     std::wstring url = L"https://news.ycombinator.com/newest";
-    json result = NavigateAndExecute(session, url, kJsExtractRawPage, "[hn]", 2000, 30000);
+    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
 
-    (void)count;
-    return result;
+    json stories = json::array();
+    if (raw.is_string()) {
+        try {
+            stories = json::parse(raw.get<std::string>());
+        } catch (...) {
+            return McpError("ERROR: [hn] failed to parse new stories JSON");
+        }
+    } else if (raw.is_array()) {
+        stories = raw;
+    } else {
+        return McpError("ERROR: [hn] failed to fetch new stories");
+    }
+
+    if ((int)stories.size() > count) {
+        json trimmed = json::array();
+        int idx = 0;
+        for (auto it = stories.begin(); it != stories.end() && idx < count; ++it, ++idx) {
+            trimmed.push_back(*it);
+        }
+        stories = std::move(trimmed);
+    }
+
+    json payload = {
+        {"source", "hackernews"},
+        {"list_type", "new"},
+        {"count", (int)stories.size()},
+        {"stories", stories}
+    };
+    return WrapMcpResult(payload);
 }
 
 // 3. hn_get_best_stories
@@ -167,10 +237,37 @@ json ToolHnGetBestStories(WebViewSession& session, const json& args) {
     if (count > 100) count = 100;
 
     std::wstring url = L"https://news.ycombinator.com/best";
-    json result = NavigateAndExecute(session, url, kJsExtractRawPage, "[hn]", 2000, 30000);
+    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
 
-    (void)count;
-    return result;
+    json stories = json::array();
+    if (raw.is_string()) {
+        try {
+            stories = json::parse(raw.get<std::string>());
+        } catch (...) {
+            return McpError("ERROR: [hn] failed to parse best stories JSON");
+        }
+    } else if (raw.is_array()) {
+        stories = raw;
+    } else {
+        return McpError("ERROR: [hn] failed to fetch best stories");
+    }
+
+    if ((int)stories.size() > count) {
+        json trimmed = json::array();
+        int idx = 0;
+        for (auto it = stories.begin(); it != stories.end() && idx < count; ++it, ++idx) {
+            trimmed.push_back(*it);
+        }
+        stories = std::move(trimmed);
+    }
+
+    json payload = {
+        {"source", "hackernews"},
+        {"list_type", "best"},
+        {"count", (int)stories.size()},
+        {"stories", stories}
+    };
+    return WrapMcpResult(payload);
 }
 
 // 4. hn_get_item
