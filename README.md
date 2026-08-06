@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **8 源 59 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **8 源 65 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
 - **单一技术栈**:一个基类 `WebViewSession`,一种调用模式 `Navigate + ExecuteScript`,一种错误处理范式,一种日志输出格式,一种限流策略
 - **无 HTTP API 依赖**:不混入 WinHTTP / libcurl / cpr,避免两套网络层 / 两套错误处理 / 两套限流逻辑 / 两套调试方式
 - **统一原始文本提取**:所有工具统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI,工具不做复杂选择器适配
@@ -360,7 +360,7 @@ cmake --build build --config Release
 | `--hf-profile <DIR>` | 启用 Hugging Face WebView 会话 |
 | `--s2-profile <DIR>` | 启用 Semantic Scholar WebView 会话 |
 | `--so-profile <DIR>` | 启用 Stack Overflow WebView 会话 |
-| `--cache-smoke-test` | 运行 127 项缓存层烟雾测试(不依赖 WebView2) |
+| `--cache-smoke-test` | 运行 188 项缓存层烟雾测试(不依赖 WebView2) |
 | `--help` / `-h` | 显示帮助 |
 
 未指定 `--xxx-profile` 的源不启用,对应工具调用返回 `session not initialized`。
@@ -400,7 +400,7 @@ $env:HTTP_PROXY  = "http://127.0.0.1:7897"
 $body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 $r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
 "tools count: $($r.result.tools.Count)"
-# → tools count: 59
+# → tools count: 65
 ```
 
 ### arXiv 论文详情(支持 cache_hit)
@@ -514,7 +514,7 @@ $r.result.content[0].text
 
 失败结果写入缓存(`fetch_status=failed`,TTL=1h),短时间内重复调用直接返回失败缓存,不再重复尝试 WebView2 初始化。
 
-## 工具列表(59 个)
+## 工具列表(65 个)
 
 ### GitHub(18 个)
 
@@ -563,7 +563,7 @@ $r.result.content[0].text
 | `hn_get_latest_index` | 最新索引快照 |
 | `hn_fetch_detailed_story` | 故事详情 + 跨源 mentions 关系自动建立 |
 
-### npm / PyPI(4 个)
+### npm / PyPI(5 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -571,8 +571,9 @@ $r.result.content[0].text
 | `pkg_get_npm_detail` | 获取 npm 包详情 |
 | `pkg_search_pypi` | 搜索 PyPI 包 |
 | `pkg_get_pypi_detail` | 获取 PyPI 包详情 |
+| `pkg_fetch_detail` | 包详情 + 缓存(TTL=24h, cache_hit) + package 实体注册 |
 
-### Papers with Code(5 个)
+### Papers with Code(6 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -581,8 +582,9 @@ $r.result.content[0].text
 | `pwc_get_sota` | 获取 SOTA(State-of-the-Art)结果 |
 | `pwc_search_tasks` | 搜索任务 |
 | `pwc_search_datasets` | 搜索数据集 |
+| `pwc_fetch_paper_detail` | 论文详情 + 缓存(TTL=72h) + paper 实体注册 + pwc_stars 时间快照 |
 
-### Hugging Face(7 个)
+### Hugging Face(9 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -593,8 +595,10 @@ $r.result.content[0].text
 | `hf_get_dataset_info` | 数据集详情 |
 | `hf_get_trending_models` | 热门模型 |
 | `hf_search_spaces` | 搜索 Spaces |
+| `hf_fetch_model_detail` | 模型详情 + 缓存(TTL=12h) + model 实体注册 + derived_from 关系 |
+| `hf_fetch_dataset_detail` | 数据集详情 + 缓存(TTL=24h) + dataset 实体注册 |
 
-### Semantic Scholar(6 个)
+### Semantic Scholar(7 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -604,8 +608,9 @@ $r.result.content[0].text
 | `s2_get_references` | 参考文献列表 |
 | `s2_get_author_papers` | 作者论文列表 |
 | `s2_search_author` | 搜索作者 |
+| `s2_fetch_paper_detail` | 论文详情 + 缓存(TTL=72h) + paper 实体注册 + citations_observed 时间快照 |
 
-### Stack Overflow(5 个)
+### Stack Overflow(6 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -614,6 +619,7 @@ $r.result.content[0].text
 | `so_get_top_answers` | 获取热门答案 |
 | `so_search_by_tags` | 按标签搜索 |
 | `so_get_similar` | 获取相似问题 |
+| `so_fetch_question_detail` | 问题详情 + 缓存(TTL=24h) + question 实体注册 + mentions 关系 + so_observed 时间快照 |
 
 ## 客户端配置
 
@@ -729,7 +735,7 @@ WebView2 ExecuteScript 不 await Promise 的已知问题。本服务已改用 `N
 
 ## 测试
 
-### 缓存层烟雾测试(127 项,不依赖 WebView2)
+### 缓存层烟雾测试(188 项,不依赖 WebView2)
 
 ```powershell
 .\build\Release\research-mcp.exe --cache-smoke-test
@@ -746,6 +752,7 @@ WebView2 ExecuteScript 不 await Promise 的已知问题。本服务已改用 `N
 | L4 清洗+搜索 | 22 | CleanerPipeline/cross_source_search/force_refresh |
 | L5 实体+关系+时间序列 | 22 | register_entity/find_entity/add_relation/traverse_graph/record_metric |
 | L6 arXiv/HN 真实接入 | 24 | paper cache(72h)/abs cache/story cache(12h)/authored_by/discussed_in/mentions 跨源闭合/失败缓存/时间序列 |
+| L7 6 源扩展接入 | 61 | npm/pypi(8)+pwc(6)+hf(12)+s2(8)+so(8): 缓存读写/实体注册/跨源关系/降级策略/时间序列/数据源注册/熔断器/失败缓存 |
 
 预期输出:
 
@@ -755,11 +762,14 @@ WebView2 ExecuteScript 不 await Promise 的已知问题。本服务已改用 `N
 ...
 [SMOKE PASS] cross-source graph traverse >= 2 levels
 [SMOKE PASS] cross-source graph has nodes
-[SMOKE PASS] arxiv failed cache stored
-[SMOKE PASS] hn failed cache status
-[SMOKE PASS] arxiv paper metric timeseries
-[SMOKE PASS] hn story metric timeseries
-[SMOKE SUMMARY] pass=127 fail=0
+...
+[SMOKE PASS] entity_count >= 10 (extended)
+[SMOKE PASS] relation_count >= 5 (extended)
+[SMOKE PASS] find_entity react package
+[SMOKE PASS] find_entity bert model
+[SMOKE PASS] find_entity squad dataset
+[SMOKE PASS] find_entity JSON question
+[SMOKE SUMMARY] pass=188 fail=0
 ```
 
 ### 单元测试
@@ -792,12 +802,231 @@ cmake --build build --config Release --target test_smoke
 | 浏览器指纹 | 无 | 完整(与 Edge 一致) |
 | 反爬能力 | 弱 | 强(真实浏览器) |
 | 数据源 | GitHub 单源 | 8 源统一接入 |
-| 缓存层 | 无 | SQLite WAL + 5 张表 + 127 项烟雾测试 |
+| 缓存层 | 无 | SQLite WAL + 5 张表 + 188 项烟雾测试 |
 | 多源融合 | 无 | 字段级 UNION/LATEST 策略 + 熔断器 + 降级链 |
 | 关系图谱 | 无 | Entity Mapper + 跨源 mentions 自动建立 |
 | 三层观测 | 无 | L1 概览 / L2 单点深挖 / L3 关联图谱 |
 | 编排主体 | agent runtime | 本地 LLM 客户端 |
 | 平台 | 跨平台 | Windows 10/11 专属 |
+
+## llama.cpp server 语义驱动 MCP 功能列表
+
+### 设计原理
+
+使用 `<尖括号>` 语义模板驱动 llama.cpp server 将自然语言用户请求解析为具体 MCP 工具调用。
+llama.cpp 通过 `--mcp http://host:port/mcp` 挂载后,LLM 可直接识别语义模板并生成对应参数。
+
+### GitHub 源(19 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<获取 github 项目 <owner/repo> 的基本信息>` | `github_get_repo_info` |
+| `<读取 github 项目 <owner/repo> 的 README 文档>` | `github_get_readme` |
+| `<列出 github 项目 <owner/repo> 的目录树,深度 <depth>>` | `github_get_tree` |
+| `<统计 github 项目 <owner/repo> 的语言分布>` | `github_get_languages` |
+| `<获取 github 项目 <owner/repo> 的贡献者列表,前 <N> 名>` | `github_get_contributors` |
+| `<分析 github 项目 <owner/repo> 在 <分支> 的最近 <N> 条提交>` | `github_get_commits` |
+| `<枚举 github 项目 <owner/repo> 的所有分支>` | `github_get_branches` |
+| `<查询 github 项目 <owner/repo> 的 issues,状态 <state>,前 <N> 条>` | `github_get_issues` |
+| `<查询 github 项目 <owner/repo> 的 PR,状态 <state>,前 <N> 条>` | `github_get_pull_requests` |
+| `<获取 github 项目 <owner/repo> 的发布历史,前 <N> 个版本>` | `github_get_releases` |
+| `<汇总 github 项目 <owner/repo> 的整体概览>` | `github_summarize_repo` |
+| `<搜索 github 上 <关键词/语言/topic/星数> 的热点项目>` | `github_search_repositories` |
+| `<搜索 github 上 <关键词> 的用户或组织>` | `github_search_users` |
+| `<在本地缓存索引中搜索 github 项目 <关键词>>` | `github_search_index` |
+| `<抓取 github 项目 <owner/repo> 的详情并写入缓存+实体注册>` | `github_fetch_repo_detail` |
+| `<查询 github 项目 <owner/repo> 的关联实体网络>` | `github_fetch_relation_network` |
+| `<导入 github 项目 <owner/repo> 的完整提交时间线>` | `github_ingest_commit_timeline` |
+| `<导入 github 项目 <owner/repo> 的近期提交时间线>` | `github_ingest_recent_commits_timeline` |
+| `<分析 github 项目 <owner/repo> 的模块演进时间线>` | `github_module_timeline_analysis` |
+
+### arXiv 源(6 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<搜索 arxiv 上 <关键词> 的论文,前 <N> 篇>` | `arxiv_search_papers` |
+| `<获取 arxiv 论文 <arxiv_id> 的详细信息>` | `arxiv_get_paper_detail` |
+| `<获取 arxiv 论文 <arxiv_id> 的 PDF 下载链接>` | `arxiv_get_pdf_link` |
+| `<检查 arxiv 论文 <arxiv_id> 是否可访问>` | `arxiv_check_available` |
+| `<在本地缓存索引中搜索 arxiv 论文 <关键词>>` | `arxiv_search_index` |
+| `<抓取 arxiv 论文 <arxiv_id> 的详情并写入缓存+实体注册>` | `arxiv_fetch_paper_detail` |
+
+### Hacker News 源(7 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<获取 hackernews 当前 top <N> 条故事>` | `hn_get_top_stories` |
+| `<获取 hackernews 最新 <N> 条故事>` | `hn_get_new_stories` |
+| `<获取 hackernews best <N> 条故事>` | `hn_get_best_stories` |
+| `<获取 hackernews item <id> 的详情>` | `hn_get_item` |
+| `<按关键词 <query> 搜索 hackernews 故事>` | `hn_search_by_keyword` |
+| `<获取 hackernews 最新索引快照>` | `hn_get_latest_index` |
+| `<抓取 hackernews 故事 <id> 的详情并写入缓存+实体注册>` | `hn_fetch_detailed_story` |
+
+### Package 源 npm+PyPI(5 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<搜索 npm 上 <关键词> 的包,前 <N> 个>` | `pkg_search_npm` |
+| `<获取 npm 包 <name> 的详细信息>` | `pkg_get_npm_detail` |
+| `<搜索 pypi 上 <关键词> 的包,前 <N> 个>` | `pkg_search_pypi` |
+| `<获取 pypi 包 <name> 的详细信息>` | `pkg_get_pypi_detail` |
+| `<抓取 <npm/pypi> 包 <name> 的详情并写入缓存+实体注册>` | `pkg_fetch_detail` |
+
+### Papers with Code 源(6 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<搜索 paperswithcode 上 <关键词> 的论文>` | `pwc_search_papers` |
+| `<获取 paperswithcode 论文 <paper_id> 的详情>` | `pwc_get_paper_detail` |
+| `<查询 paperswithcode 上 <task> 的 SOTA 模型>` | `pwc_get_sota` |
+| `<搜索 paperswithcode 上的任务 <关键词>>` | `pwc_search_tasks` |
+| `<搜索 paperswithcode 上的数据集 <关键词>>` | `pwc_search_datasets` |
+| `<抓取 paperswithcode 论文 <paper_id> 的详情并写入缓存+实体注册>` | `pwc_fetch_paper_detail` |
+
+### Hugging Face 源(9 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<搜索 huggingface 上 <关键词> 的模型>` | `hf_search_models` |
+| `<获取 huggingface 模型 <model_id> 的信息>` | `hf_get_model_info` |
+| `<读取 huggingface 模型 <model_id> 的 README>` | `hf_get_model_readme` |
+| `<搜索 huggingface 上 <关键词> 的数据集>` | `hf_search_datasets` |
+| `<获取 huggingface 数据集 <dataset_id> 的信息>` | `hf_get_dataset_info` |
+| `<获取 huggingface 当前 trending 模型>` | `hf_get_trending_models` |
+| `<搜索 huggingface 上 <关键词> 的 space>` | `hf_search_spaces` |
+| `<抓取 huggingface 模型 <model_id> 的详情并写入缓存+实体注册>` | `hf_fetch_model_detail` |
+| `<抓取 huggingface 数据集 <dataset_id> 的详情并写入缓存+实体注册>` | `hf_fetch_dataset_detail` |
+
+### Semantic Scholar 源(7 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<搜索 semanticscholar 上 <关键词> 的论文>` | `s2_search_papers` |
+| `<获取 semanticscholar 论文 <paper_id> 的详情>` | `s2_get_paper_detail` |
+| `<查询 semanticscholar 论文 <paper_id> 的引用列表>` | `s2_get_citations` |
+| `<查询 semanticscholar 论文 <paper_id> 的参考文献>` | `s2_get_references` |
+| `<获取 semanticscholar 作者 <author_id> 的论文列表>` | `s2_get_author_papers` |
+| `<搜索 semanticscholar 上的作者 <关键词>>` | `s2_search_author` |
+| `<抓取 semanticscholar 论文 <paper_id> 的详情并写入缓存+实体注册>` | `s2_fetch_paper_detail` |
+
+### Stack Overflow 源(6 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<搜索 stackoverflow 上 <query> 的问题>` | `so_search_questions` |
+| `<获取 stackoverflow 问题 <question_id> 的详情>` | `so_get_question_detail` |
+| `<获取 stackoverflow 问题 <question_id> 的 top <N> 回答>` | `so_get_top_answers` |
+| `<按 tags <tags> 搜索 stackoverflow 问题>` | `so_search_by_tags` |
+| `<按标题 <title> 查找 stackoverflow 相似问题>` | `so_get_similar` |
+| `<抓取 stackoverflow 问题 <question_id> 的详情并写入缓存+实体注册>` | `so_fetch_question_detail` |
+
+### llama.cpp server 集成示例
+
+```powershell
+# MCP 配置 mcp_config.json
+{
+  "mcpServers": {
+    "research": {
+      "type": "stdio",
+      "command": "D:/DeerFlow/DeerFlow++/build/Release/research-mcp.exe",
+      "args": [
+        "--port", "8765",
+        "--gh-profile", "./profiles/gh",
+        "--arxiv-profile", "./profiles/arxiv",
+        "--hn-profile", "./profiles/hn",
+        "--pkg-profile", "./profiles/pkg",
+        "--pwc-profile", "./profiles/pwc",
+        "--hf-profile", "./profiles/hf",
+        "--s2-profile", "./profiles/s2",
+        "--so-profile", "./profiles/so",
+        "--proxy", "http://127.0.0.1:7897"
+      ],
+      "env": { "GITHUB_TOKEN": "ghp_xxx" }
+    }
+  }
+}
+
+# 启动 llama.cpp server (HTTP 模式 + MCP)
+llama-server.exe ^
+  -m models/qwen2.5-14b-instruct-q5_k_m.gguf ^
+  --port 8080 ^
+  --mcp-config mcp_config.json ^
+  --mcp-protocol http
+```
+
+### 语义驱动调用链示例
+
+**用户请求**:`帮我分析 github 项目 langchain-ai/langchain 在最近3个月内的相关活跃信息`
+
+```
+1. <获取 github 项目 langchain-ai/langchain 的基本信息>
+   → github_get_repo_info(owner="langchain-ai", repo="langchain")
+
+2. <枚举 github 项目 langchain-ai/langchain 的所有分支>
+   → github_get_branches(owner="langchain-ai", repo="langchain")
+
+3. <分析 github 项目 langchain-ai/langchain 在 main 的最近 50 条提交>
+   → github_get_commits(owner="langchain-ai", repo="langchain", branch="main", limit=50)
+
+4. <查询 github 项目 langchain-ai/langchain 的 issues,状态 all,前 30 条>
+   → github_get_issues(owner="langchain-ai", repo="langchain", state="all", limit=30)
+
+5. <查询 github 项目 langchain-ai/langchain 的 PR,状态 all,前 30 条>
+   → github_get_pull_requests(owner="langchain-ai", repo="langchain", state="all", limit=30)
+```
+
+**跨源用户请求**:`研究 bert 模型的论文、实现、使用情况和社区讨论`
+
+```
+1. <搜索 arxiv 上 bert 的论文>
+   → arxiv_search_papers(query="bert", max_results=5)
+
+2. <抓取 arxiv 论文 1810.04805 的详情并写入缓存+实体注册>
+   → arxiv_fetch_paper_detail(arxiv_id="1810.04805")
+
+3. <搜索 huggingface 上 bert 的模型>
+   → hf_search_models(query="bert")
+
+4. <抓取 huggingface 模型 bert-base-uncased 的详情并写入缓存+实体注册>
+   → hf_fetch_model_detail(model_id="bert-base-uncased")
+
+5. <搜索 stackoverflow 上 bert fine-tuning 的问题>
+   → so_search_questions(query="bert fine-tuning")
+
+6. <搜索 npm 上 bert 的包>
+   → pkg_search_npm(query="bert")
+```
+
+## 真实网络端到端验证(HTTP Server 状态)
+
+### 验证结果(2026-08-06)
+
+| 验证项 | 结果 | 说明 |
+|---|---|---|
+| GET `/` | ✅ | 返回 8 源状态(GitHub=true,其余需 --xxx-profile) |
+| GET `/tools` | ✅ | 返回 65 个工具(完整列表) |
+| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 65 个工具,JSON-RPC id=1 正确匹配 |
+| 缓存层 188 项烟雾测试 | ✅ pass=188 fail=0 | EXIT_CODE=0 |
+| 完整 8 源 fetch 回调 | ⏸ | 需用户提供 WebView2 profile 存放路径 + 可选代理 URL |
+
+### 执行命令
+
+```powershell
+# 启动完整 8 源 HTTP Server(需先创建 profiles 目录)
+mkdir -Force ./profiles/gh,./profiles/arxiv,./profiles/hn,./profiles/pkg,./profiles/pwc,./profiles/hf,./profiles/s2,./profiles/so
+
+.\build\Release\research-mcp.exe --port 8765 `
+  --gh-profile    ./profiles/gh `
+  --arxiv-profile ./profiles/arxiv `
+  --hn-profile    ./profiles/hn `
+  --pkg-profile   ./profiles/pkg `
+  --pwc-profile   ./profiles/pwc `
+  --hf-profile    ./profiles/hf `
+  --s2-profile    ./profiles/s2 `
+  --so-profile    ./profiles/so `
+  --proxy http://127.0.0.1:7897
+```
 
 ## 许可
 
