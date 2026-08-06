@@ -1248,8 +1248,8 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
         result["error"] = "invalid target_type: must be file/module/signature";
         return result;
     }
-    if (target_type == "file" && target_path.empty()) {
-        result["error"] = "target_path required for target_type=file";
+    if (target_type == "file" && target_path.empty() && signature_regex.empty()) {
+        result["error"] = "target_path or signature_regex required for target_type=file";
         return result;
     }
     if (target_type == "module" && module_name.empty()) {
@@ -1321,14 +1321,41 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
         json candidates = json::array();
 
         if (target_type == "file") {
-            auto tl = cm.query_file_timeline(repo_full, target_path, since_ts, 0, 1000);
-            if (!tl.empty()) {
-                json c;
-                c["file_path"]        = target_path;
-                c["change_count"]     = tl.size();
-                // 最后一次提交时间(tl 升序,取末尾)
-                c["last_commit_time"] = tl.back().value("commit_time", 0);
-                candidates.push_back(c);
+            if (!target_path.empty()) {
+                // 单个精确文件路径
+                auto tl = cm.query_file_timeline(repo_full, target_path, since_ts, 0, 1000);
+                if (!tl.empty()) {
+                    json c;
+                    c["file_path"]        = target_path;
+                    c["change_count"]     = tl.size();
+                    // 最后一次提交时间(tl 升序,取末尾)
+                    c["last_commit_time"] = tl.back().value("commit_time", 0);
+                    candidates.push_back(c);
+                }
+            } else if (!signature_regex.empty()) {
+                // 用 signature_regex 做 file_path 子串匹配过滤
+                auto sigs = cm.search_by_signature(repo_full, signature_regex, since_ts, 1000);
+                std::map<std::string, std::pair<int, int64_t>> file_summary;
+                for (auto& s : sigs) {
+                    std::string fp = s.value("file_path", "");
+                    if (fp.empty()) continue;
+                    int64_t ct = s.value("commit_time", 0);
+                    auto it = file_summary.find(fp);
+                    if (it == file_summary.end()) {
+                        file_summary[fp] = {1, ct};
+                    } else {
+                        it->second.first++;
+                        if (ct > it->second.second) it->second.second = ct;
+                    }
+                }
+                for (auto& kv : file_summary) {
+                    json c;
+                    c["file_path"]        = kv.first;
+                    c["change_count"]     = kv.second.first;
+                    c["last_commit_time"] = kv.second.second;
+                    c["matched_by"]       = "signature_regex";
+                    candidates.push_back(c);
+                }
             }
         } else if (target_type == "module") {
             auto files = cm.query_module_files(repo_full, module_name);
@@ -1383,9 +1410,54 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
     json change_density   = json::array();
 
     if (target_type == "file") {
-        timeline       = cm.query_file_timeline(repo_full, target_path, since_ts, 0, 500);
-        change_density = cm.query_change_density(repo_full, target_path, since_ts, 24);
-        related_files  = cm.query_related_files(repo_full, target_path, 2, 20);
+        if (!target_path.empty()) {
+            // 单个精确文件路径
+            timeline       = cm.query_file_timeline(repo_full, target_path, since_ts, 0, 500);
+            change_density = cm.query_change_density(repo_full, target_path, since_ts, 24);
+            related_files  = cm.query_related_files(repo_full, target_path, 2, 20);
+        } else if (!signature_regex.empty()) {
+            // 用 signature_regex 做 file_path + commit_message 子串匹配,聚合所有匹配文件
+            auto sigs = cm.search_by_signature(repo_full, signature_regex, since_ts, 2000);
+            std::set<std::string> matched_files;
+            for (auto& s : sigs) {
+                timeline.push_back(s);
+                std::string fp = s.value("file_path", "");
+                if (!fp.empty()) matched_files.insert(fp);
+            }
+            // 每个匹配到的文件分别计算 change_density + related_files 合并
+            std::map<std::string, int> density_month;
+            std::map<std::string, int> related_count;
+            for (auto& mf : matched_files) {
+                auto cd = cm.query_change_density(repo_full, mf, since_ts, 24);
+                for (auto& m : cd) {
+                    std::string k = m.value("month", "");
+                    int c         = m.value("changes", 0);
+                    if (!k.empty()) density_month[k] += c;
+                }
+                auto rf = cm.query_related_files(repo_full, mf, 2, 20);
+                for (auto& r : rf) {
+                    std::string p = r.value("file_path", "");
+                    int c         = r.value("co_change_count", 0);
+                    if (!p.empty()) related_count[p] += c;
+                }
+            }
+            for (auto& kv : density_month) {
+                change_density.push_back({
+                    {"month",   kv.first},
+                    {"changes", kv.second}
+                });
+            }
+            std::vector<std::pair<std::string, int>> rf_sorted(related_count.begin(), related_count.end());
+            std::sort(rf_sorted.begin(), rf_sorted.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            size_t rf_limit = rf_sorted.size() > 20 ? 20 : rf_sorted.size();
+            for (size_t i = 0; i < rf_limit; ++i) {
+                related_files.push_back({
+                    {"file_path",       rf_sorted[i].first},
+                    {"co_change_count", rf_sorted[i].second}
+                });
+            }
+        }
 
         // 从 timeline 中聚合 contributor_rank
         std::map<std::string, int> user_changes;

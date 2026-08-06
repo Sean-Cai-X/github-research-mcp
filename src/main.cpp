@@ -43,11 +43,12 @@ static void print_help() {
               << "    --hf-profile ./profiles/hf \\\n"
               << "    --s2-profile ./profiles/s2 \\\n"
               << "    --so-profile ./profiles/so \\\n"
-              << "    --proxy http://127.0.0.1:7897\n\n"
+              << "    --proxy http://127.0.0.1:7897 \\\n"
+              << "    --gh-token ghp_xxxxxxxxxxxx\n\n"
               << "Minimal (GitHub only, 13 tools):\n"
               << "  research-mcp.exe --port 8765\n\n"
               << "Environment:\n"
-              << "  GITHUB_TOKEN             Personal access token (optional)\n"
+              << "  GITHUB_TOKEN             Personal access token (optional, --gh-token overrides)\n"
               << "  GITHUB_RESEARCH_TIMEOUT  Request timeout seconds (default: 30)\n"
               << "  HTTPS_PROXY/HTTP_PROXY/ALL_PROXY  Proxy URL\n";
 }
@@ -122,6 +123,8 @@ int main(int argc, char* argv[]) {
             profiles.s2 = argv[++i];
         } else if (arg == "--so-profile" && i + 1 < argc) {
             profiles.so = argv[++i];
+        } else if (arg == "--gh-token" && i + 1 < argc) {
+            token = std::string(argv[++i]);
         } else {
             std::cerr << "Unknown argument: " << arg << "\n\n";
             print_help();
