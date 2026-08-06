@@ -23,27 +23,28 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # NuGet 包 = zip,直接下载并解压(本地 third_party/WebView2/lib、redist 被 .gitignore 忽略,必须云端补齐)
-          $nupkg = "WebView2.nupkg"
+          $ProgressPreference = 'SilentlyContinue'
+          # NuGet 包本质是 zip,但 Expand-Archive 只认 .zip 扩展名,必须用 .zip 下载
+          $nupkg = "WebView2.zip"
           Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2792.45" `
             -OutFile $nupkg -MaximumRedirection 10
           $extract = "WebView2-nupkg"
           Expand-Archive -Path $nupkg -DestinationPath $extract -Force
 
-          # 组织成 CMakeLists 期望的目录结构:
+          # 组织成 CMakeLists 期望的目录结构(NuGet 包内实际路径为 build/native/...):
           #   third_party/WebView2/include/WebView2.h
           #   third_party/WebView2/include/WebView2EnvironmentOptions.h
           #   third_party/WebView2/lib/x64/WebView2Loader.dll.lib
           #   third_party/WebView2/redist/x64/WebView2Loader.dll
           $dst = "third_party/WebView2"
           New-Item -ItemType Directory -Force -Path "$dst/include", "$dst/lib/x64", "$dst/redist/x64" | Out-Null
-          Copy-Item "$extract/lib/native/include/WebView2.h"                 "$dst/include/" -Force
-          Copy-Item "$extract/lib/native/include/WebView2EnvironmentOptions.h" "$dst/include/" -Force
-          Copy-Item "$extract/lib/native/x64/WebView2Loader.dll.lib"         "$dst/lib/x64/" -Force
-          # redist dll: 优先 runtimes/win-x64/native,回退 lib/native/x64
+          Copy-Item "$extract/build/native/include/WebView2.h"                 "$dst/include/" -Force
+          Copy-Item "$extract/build/native/include/WebView2EnvironmentOptions.h" "$dst/include/" -Force
+          Copy-Item "$extract/build/native/x64/WebView2Loader.dll.lib"         "$dst/lib/x64/" -Force
+          # redist dll: 优先 runtimes/win-x64/native,回退 build/native/x64
           $redistSrc = "$extract/runtimes/win-x64/native/WebView2Loader.dll"
           if (-not (Test-Path $redistSrc)) {
-            $redistSrc = "$extract/lib/native/x64/WebView2Loader.dll"
+            $redistSrc = "$extract/build/native/x64/WebView2Loader.dll"
           }
           Copy-Item $redistSrc "$dst/redist/x64/" -Force
           Write-Host "WebView2 SDK 就位:"
