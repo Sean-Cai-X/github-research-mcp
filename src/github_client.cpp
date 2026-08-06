@@ -1226,7 +1226,8 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
                                             const std::string& signature_regex,
                                             const std::string& time_range,
                                             int layer,
-                                            bool ingest_first) {
+                                            bool ingest_first,
+                                            const std::string& branch) {
     CacheManager& cm = CacheManager::instance();
     std::string repo_full = owner + "/" + repo;
 
@@ -1235,6 +1236,7 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
     result["target_type"]    = target_type;
     result["time_range"]     = time_range;
     result["layer"]          = layer;
+    if (!branch.empty()) result["branch"] = branch;
 
     if (!cm.is_ready()) {
         result["error"] = "cache manager not ready";
@@ -1273,14 +1275,14 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
         int ingested = 0;
         try {
             // 限制单次最多 50 commits,避免长时间阻塞
-            ingested = ingest_recent_commits_timeline(owner, repo, window_days, "", 50);
+            ingested = ingest_recent_commits_timeline(owner, repo, window_days, branch, 50);
             result["ingest_records"] = ingested;
 
             // 若模块表为空,自动聚类(从 tree API 拉取文件列表)
             auto existing_modules = cm.list_modules(repo_full);
             if (existing_modules.empty()) {
                 try {
-                    json tree = get_tree_raw(owner, repo, "main", true);
+                    json tree = get_tree_raw(owner, repo, branch.empty() ? "main" : branch, true);
                     std::vector<std::string> all_files;
                     if (tree.is_object() && tree.contains("tree") && tree["tree"].is_array()) {
                         for (auto& entry : tree["tree"]) {

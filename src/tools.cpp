@@ -356,10 +356,12 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
             if (args.contains("ingest_first") && args["ingest_first"].is_boolean()) {
                 ingest_first = args["ingest_first"].get<bool>();
             }
+            std::string branch = get_string_arg(args, "branch", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
             json r = client.module_timeline_analysis(owner, repo, target_type,
                                                       target_path, module_name,
                                                       signature_regex, time_range,
-                                                      layer, ingest_first);
+                                                      layer, ingest_first, branch);
             return make_success_result(r.dump(-1, ' ', false, json::error_handler_t::replace));
 
         } else {

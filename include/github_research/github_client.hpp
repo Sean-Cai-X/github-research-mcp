@@ -187,6 +187,7 @@ public:
     //   time_range: "1y" / "180d" / "90d" / "30d"
     //   layer: 1=轻量索引层(只返回候选) 2=定点深挖(完整时序) 3=二级递进(向外扩散)
     //   ingest_first: 若本地无数据,先增量抓取 commits
+    //   branch: 分支名(空表示默认分支;支持 codex/cxcore-integration 等带斜杠分支)
     // 返回结构按 layer 不同:
     //   layer=1: {candidates:[{file_path,module_name,change_count,last_commit_time}]}
     //   layer=2: {timeline:[...], contributor_rank:[...], related_files:[...],
@@ -200,7 +201,8 @@ public:
                                    const std::string& signature_regex = "",
                                    const std::string& time_range = "1y",
                                    int layer = 2,
-                                   bool ingest_first = true);
+                                   bool ingest_first = true,
+                                   const std::string& branch = "");
 
     // WebView2 是否就绪
     bool is_ready() const { return http_client_.is_ready(); }

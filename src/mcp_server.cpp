@@ -1047,7 +1047,8 @@ json McpServer::handle_tools_list() {
                         {"signature_regex", json::object({{"type","string"},{"default",""},{"description","Required when target_type=signature (substring match on file_path/commit_message)"}})},
                         {"time_range", json::object({{"type","string"},{"default","1y"},{"enum", json::array({"1y","180d","90d","30d"})}})},
                         {"layer", json::object({{"type","integer"},{"default",2},{"minimum",1},{"maximum",3}})},
-                        {"ingest_first", json::object({{"type","boolean"},{"default",true},{"description","If true, auto-ingest recent commits + auto-cluster modules + pre-aggregate before query"}})}
+                        {"ingest_first", json::object({{"type","boolean"},{"default",true},{"description","If true, auto-ingest recent commits + auto-cluster modules + pre-aggregate before query"}})},
+                        {"branch", json::object({{"type","string"},{"default",""},{"description","Branch name for non-default branch (e.g. codex/cxcore-integration). Empty = default branch"}})}
                     })},
                     {"required", json::array({"owner","repo","target_type"})}
                 })}
