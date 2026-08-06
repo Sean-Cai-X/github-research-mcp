@@ -31,6 +31,16 @@ json NavigateAndExecute(WebViewSession& session,
                         int waitMs = 2000,
                         uint32_t navTimeoutMs = 30000);
 
+// 与 NavigateAndExecute 相同流程,但返回解析后的原始 JSON payload(不包装 MCP content)
+// 用于需要多次导航后合并结构化结果的场景(如 hn_fetch_detailed_story)
+// 失败时返回 null json(is_null() == true)
+json NavigateAndExecuteRaw(WebViewSession& session,
+                           const std::wstring& url,
+                           const std::string& js,
+                           const char* logPrefix = "",
+                           int waitMs = 2000,
+                           uint32_t navTimeoutMs = 30000);
+
 // 快速返回错误(MCP 格式)
 json McpError(const std::string& msg);
 

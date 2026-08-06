@@ -1,6 +1,7 @@
 #include "github_research/hackernews_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
+#include "github_research/cache_manager.hpp"
 #include <iostream>
 #include <string>
 
@@ -10,7 +11,113 @@ namespace github_research {
 // 内置 JS 脚本
 // ============================================================
 // 设计理念:工具只负责"取到页面内容",解析交给 AI
-// 所有工具统一使用 webview_helpers.hpp 中的 kJsExtractRawPage
+// 5 个原始工具统一使用 webview_helpers.hpp 中的 kJsExtractRawPage
+// 2 个分层工具使用专用结构化 JS(返回 JSON 数组/对象)
+
+namespace {
+
+constexpr const char* kLogPrefix = "[hn]";
+
+// HN 首页索引提取 JS:解析 tr.athing 行,返回结构化数组
+// 字段: hn_id, rank, title, external_url, score, created_min_ago, has_discussion
+constexpr const char* kJsHnIndexList = R"(
+(function(){
+  var items = [];
+  var rows = document.querySelectorAll('tr.athing');
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var id = row.getAttribute('id') || '';
+    var titleLink = row.querySelector('.titleline > a');
+    if (!titleLink) continue;
+    var title = titleLink.textContent || '';
+    var url = titleLink.href || '';
+    var rank = i + 1;
+    var rankSpan = row.querySelector('.rank');
+    if (rankSpan) {
+      var m = rankSpan.textContent.match(/(\d+)/);
+      if (m) rank = parseInt(m[1]);
+    }
+    var score = 0;
+    var age = '';
+    var hasDiscussion = false;
+    var subtext = null;
+    var next = row.nextElementSibling;
+    while (next) {
+      var s = next.querySelector ? next.querySelector('.subtext') : null;
+      if (s) { subtext = s; break; }
+      if (next.tagName === 'TR' && next.querySelector('tr.athing')) break;
+      next = next.nextElementSibling;
+    }
+    if (subtext) {
+      var scoreEl = subtext.querySelector('.score');
+      if (scoreEl) {
+        var sm = scoreEl.textContent.match(/(\d+)/);
+        if (sm) score = parseInt(sm[1]);
+      }
+      var ageEl = subtext.querySelector('.age');
+      if (ageEl) {
+        age = ageEl.textContent || '';
+        hasDiscussion = true;
+      }
+    }
+    items.push({
+      hn_id: id,
+      rank: rank,
+      title: title,
+      external_url: url,
+      score: score,
+      created_min_ago: age,
+      has_discussion: hasDiscussion
+    });
+  }
+  return JSON.stringify(items);
+})();
+)";
+
+// HN item 页提取 JS:解析标题/源URL/评论树
+// 字段: {title, source_url, comments:[{author,text,reply_level}]}
+// 过滤 [dead]/[deleted] 评论
+constexpr const char* kJsHnItemDetail = R"(
+(function(){
+  var titleEl = document.querySelector('.titleline > a');
+  if (!titleEl) {
+    var titleRow = document.querySelector('tr.athing');
+    if (titleRow) titleEl = titleRow.querySelector('a');
+  }
+  var title = titleEl ? titleEl.textContent : '';
+  var sourceUrl = titleEl ? titleEl.href : '';
+  var comments = [];
+  var rows = document.querySelectorAll('.comtr');
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var author = '';
+    var authorEl = r.querySelector('.hnuser');
+    if (authorEl) author = authorEl.textContent;
+    var textEl = r.querySelector('.commtext');
+    var text = textEl ? textEl.textContent : '';
+    if (!text) continue;
+    if (text.indexOf('[dead]') >= 0 || text.indexOf('[deleted]') >= 0) continue;
+    var indent = 0;
+    var img = r.querySelector('img[src*="s.gif"]');
+    if (img) {
+      var w = parseInt(img.getAttribute('width')) || 0;
+      indent = Math.floor(w / 40);
+    }
+    comments.push({
+      author: author,
+      text: text,
+      reply_level: indent + 1
+    });
+  }
+  return JSON.stringify({
+    title: title,
+    source_url: sourceUrl,
+    comments: comments
+  });
+})();
+)";
+
+} // anonymous namespace
 
 // ============================================================
 // 工具实现
@@ -116,6 +223,304 @@ json ToolHnSearchByKeyword(WebViewSession& session, const json& args) {
 
     (void)count;
     return result;
+}
+
+// ============================================================
+// 6. hn_get_latest_index - 轻量索引(结构化,无深度请求)
+// ============================================================
+// 设计:只导航一次 HN 首页/newest/best,解析 tr.athing 行
+// 返回结构化数组,不抓取任何外部页面,网络请求最小化
+json ToolHnGetLatestIndex(WebViewSession& session, const json& args) {
+    int limit = 30;
+    if (args.contains("limit") && args["limit"].is_number_integer()) {
+        limit = args["limit"].get<int>();
+    }
+    if (limit < 1) limit = 1;
+    if (limit > 100) limit = 100;
+
+    std::string source = "front";
+    if (args.contains("source") && args["source"].is_string()) {
+        source = args["source"].get<std::string>();
+    }
+
+    std::string urlStr;
+    if (source == "newest") {
+        urlStr = "https://news.ycombinator.com/newest";
+    } else if (source == "best") {
+        urlStr = "https://news.ycombinator.com/best";
+    } else {
+        urlStr = "https://news.ycombinator.com/";
+    }
+    std::wstring url = to_wstring(urlStr);
+
+    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
+    if (raw.is_null()) {
+        return McpError("ERROR: [hn] index extraction failed (navigation or JS error)");
+    }
+
+    // raw 是结构化数组,按 limit 截断
+    json items = json::array();
+    if (raw.is_array()) {
+        int n = 0;
+        for (auto& it : raw) {
+            if (n >= limit) break;
+            items.push_back(it);
+            ++n;
+        }
+    }
+
+    json payload = {
+        {"success", true},
+        {"source", source},
+        {"total_returned", items.size()},
+        {"items", items}
+    };
+    return WrapMcpResult(payload);
+}
+
+// ============================================================
+// 7. hn_fetch_detailed_story - 按 hn_id 深度抓取
+// ============================================================
+// 流程:
+//   1. 导航 HN item 页,提取 title/source_url/comments
+//   2. (可选)导航 source_url,用 kJsExtractRawPage 取正文
+//   3. C++ 合并结构化结果,按 max_comment_count/comment_max_depth 过滤
+json ToolHnFetchDetailedStory(WebViewSession& session, const json& args) {
+    // --- 参数解析 ---
+    std::string hnId;
+    if (args.contains("hn_id")) {
+        if (args["hn_id"].is_string()) {
+            hnId = args["hn_id"].get<std::string>();
+        } else if (args["hn_id"].is_number_integer()) {
+            hnId = std::to_string(args["hn_id"].get<int>());
+        }
+    }
+    if (hnId.empty()) {
+        return McpError("ERROR: [hn] 'hn_id' parameter is required");
+    }
+    // 校验 hn_id 为纯数字
+    for (char c : hnId) {
+        if (c < '0' || c > '9') {
+            return McpError("ERROR: [hn] 'hn_id' must be numeric");
+        }
+    }
+
+    bool fetchArticle = true;
+    if (args.contains("fetch_external_article") && args["fetch_external_article"].is_boolean()) {
+        fetchArticle = args["fetch_external_article"].get<bool>();
+    }
+    bool fetchComments = true;
+    if (args.contains("fetch_comments") && args["fetch_comments"].is_boolean()) {
+        fetchComments = args["fetch_comments"].get<bool>();
+    }
+    int maxDepth = 2;
+    if (args.contains("comment_max_depth") && args["comment_max_depth"].is_number_integer()) {
+        maxDepth = args["comment_max_depth"].get<int>();
+    }
+    if (maxDepth < 1) maxDepth = 1;
+    if (maxDepth > 5) maxDepth = 5;
+    int maxComments = 80;
+    if (args.contains("max_comment_count") && args["max_comment_count"].is_number_integer()) {
+        maxComments = args["max_comment_count"].get<int>();
+    }
+    if (maxComments < 1) maxComments = 1;
+    if (maxComments > 200) maxComments = 200;
+    int textMaxChars = 20000;
+    if (args.contains("text_max_chars") && args["text_max_chars"].is_number_integer()) {
+        textMaxChars = args["text_max_chars"].get<int>();
+    }
+    if (textMaxChars < 1000) textMaxChars = 1000;
+    if (textMaxChars > 50000) textMaxChars = 50000;
+
+    // ── 缓存查询:item:{hn_id} (TTL=12h) ──
+    // 命中且新鲜时直接返回,避免重复访问 HN
+    CacheManager& cm = CacheManager::instance();
+    std::string cache_key = "item:" + hnId;
+    if (cm.is_ready()) {
+        auto cached = cm.get("hn", cache_key);
+        if (cached && cached->fetch_status == "ok" && cm.is_fresh("hn", cache_key)) {
+            try {
+                json cached_payload = json::parse(cached->payload);
+                if (cached_payload.is_object()) {
+                    cached_payload["cache_hit"] = true;
+                    cached_payload["cache_expires_at"] = cached->expires_at;
+                    return WrapMcpResult(cached_payload);
+                }
+            } catch (...) {
+                cm.invalidate("hn", cache_key);
+            }
+        }
+    }
+
+    // --- 步骤1: 导航 HN item 页,提取 title/source_url/comments ---
+    std::string itemUrlStr = "https://news.ycombinator.com/item?id=" + hnId;
+    std::wstring itemUrl = to_wstring(itemUrlStr);
+
+    // 注意: 如果不抓取评论,仍可只取 title/source_url;但 JS 一次性返回,无额外开销
+    json itemRaw = NavigateAndExecuteRaw(session, itemUrl, kJsHnItemDetail, kLogPrefix, 2500, 30000);
+    if (itemRaw.is_null()) {
+        // 写入短 TTL 失败缓存
+        if (cm.is_ready()) {
+            cm.put("hn", cache_key, "", "json", 1, "", "failed", "HN item page fetch failed");
+        }
+        return McpError(std::string("ERROR: [hn] failed to fetch HN item page for id=") + hnId);
+    }
+
+    std::string title;
+    std::string sourceUrl;
+    json comments = json::array();
+    if (itemRaw.is_object()) {
+        if (itemRaw.contains("title") && itemRaw["title"].is_string()) {
+            title = itemRaw["title"].get<std::string>();
+        }
+        if (itemRaw.contains("source_url") && itemRaw["source_url"].is_string()) {
+            sourceUrl = itemRaw["source_url"].get<std::string>();
+        }
+        if (fetchComments && itemRaw.contains("comments") && itemRaw["comments"].is_array()) {
+            // 按 max_depth 过滤,按 max_count 截断
+            int kept = 0;
+            for (auto& c : itemRaw["comments"]) {
+                if (kept >= maxComments) break;
+                int level = 1;
+                if (c.contains("reply_level") && c["reply_level"].is_number_integer()) {
+                    level = c["reply_level"].get<int>();
+                }
+                if (level > maxDepth) continue;
+                comments.push_back(c);
+                ++kept;
+            }
+        }
+    }
+
+    // --- 步骤2: (可选)导航 source_url,用 kJsExtractRawPage 取正文 ---
+    std::string articleText;
+    std::string articleStatus = "skipped";
+    // 判断 source_url 是否为外部链接(非 HN 站内)
+    bool isExternal = !sourceUrl.empty() &&
+                      sourceUrl.find("news.ycombinator.com") == std::string::npos;
+    if (fetchArticle && isExternal) {
+        std::wstring extUrl = to_wstring(sourceUrl);
+        json artRaw = NavigateAndExecuteRaw(session, extUrl, kJsExtractRawPage, kLogPrefix, 2500, 30000);
+        if (artRaw.is_object()) {
+            if (artRaw.contains("text") && artRaw["text"].is_string()) {
+                articleText = artRaw["text"].get<std::string>();
+                // 截断
+                if ((int)articleText.size() > textMaxChars) {
+                    articleText = articleText.substr(0, textMaxChars);
+                }
+                articleStatus = "ok";
+            } else {
+                articleStatus = "no_text";
+            }
+        } else {
+            articleStatus = "fetch_failed";
+        }
+    } else if (!fetchArticle) {
+        articleStatus = "disabled";
+    } else if (!isExternal) {
+        articleStatus = "no_external_url";
+    }
+
+    // --- 步骤3: 合并结构化结果 ---
+    json payload = {
+        {"success", true},
+        {"hn_id", hnId},
+        {"title", title},
+        {"source_url", sourceUrl},
+        {"article_plaintext", articleText},
+        {"article_fetch_status", articleStatus},
+        {"discussion_comments", comments},
+        {"comment_count", comments.size()},
+        {"comment_max_depth_applied", maxDepth}
+    };
+
+    // ── 缓存写入:item:{hn_id} (TTL=12h) ──
+    if (cm.is_ready()) {
+        cm.put("hn", cache_key, payload.dump(), "json", 12, "", "ok", "");
+    }
+
+    // ── entity_mapper: story → topic 实体, comments → comment 实体 ──
+    // 跨源闭合:HN story 注册为 topic 实体,建立 discussed_in/mentions 关系
+    if (cm.is_ready() && !title.empty()) {
+        // 注册 topic 实体(story 本身)
+        std::string story_eid = cm.register_entity(
+            "topic",
+            "hn:" + hnId,  // canonical_name,带 hn: 前缀避免与其他源冲突
+            {title},        // aliases = title
+            {"hackernews"}, // tags
+            {{"source_url", sourceUrl},
+             {"comment_count", (int)comments.size()},
+             {"hn_id", hnId}},
+            title
+        );
+
+        // 时间快照: comment_count
+        cm.record_metric(story_eid, "comment_count",
+                          (double)comments.size(), "hn");
+
+        // 关系: comment discussed_in story
+        // 为每个评论建立 comment 实体 + discussed_in 关系
+        int comment_idx = 0;
+        for (auto& c : comments) {
+            if (!c.is_object()) continue;
+            std::string author = c.value("author", "");
+            std::string text = c.value("text", "");
+            int level = c.value("reply_level", 1);
+            if (text.empty() && author.empty()) continue;
+
+            // comment 实体 ID: hn:{hnId}#comment:{idx}
+            std::string comment_eid = cm.register_entity(
+                "comment",
+                "hn:" + hnId + "#c" + std::to_string(comment_idx),
+                {},
+                {"hackernews"},
+                {{"author", author},
+                 {"reply_level", level},
+                 {"text_preview", text.size() > 100 ? text.substr(0, 100) : text}},
+                ""
+            );
+            cm.add_relation(comment_eid, story_eid, "discussed_in", 0.8, "hn", hnId);
+
+            // 关系: comment mentions 作者(如果作者非空)
+            if (!author.empty()) {
+                std::string person_eid = cm.register_entity(
+                    "person", author, {}, {}, json::object(), author
+                );
+                cm.add_relation(comment_eid, person_eid, "authored_by", 1.0, "hn", hnId);
+            }
+            ++comment_idx;
+            // 限制每 story 最多注册 30 条 comment 实体,防止过载
+            if (comment_idx >= 30) break;
+        }
+
+        // 跨源闭合:如果 source_url 指向 arxiv.org,建立 story mentions paper 关系
+        if (!sourceUrl.empty() && sourceUrl.find("arxiv.org") != std::string::npos) {
+            // 从 URL 提取 arxiv_id: https://arxiv.org/abs/2608.00757
+            std::string arxiv_id;
+            size_t abs_pos = sourceUrl.find("/abs/");
+            if (abs_pos != std::string::npos) {
+                arxiv_id = sourceUrl.substr(abs_pos + 5);
+                // 去除可能的版本号和查询参数
+                size_t v_pos = arxiv_id.find('v');
+                size_t q_pos = arxiv_id.find('?');
+                size_t s_pos = arxiv_id.find('/');
+                size_t cut = std::string::npos;
+                if (v_pos != std::string::npos) cut = std::min(cut, v_pos);
+                if (q_pos != std::string::npos) cut = std::min(cut, q_pos);
+                if (s_pos != std::string::npos) cut = std::min(cut, s_pos);
+                if (cut != std::string::npos) arxiv_id = arxiv_id.substr(0, cut);
+            }
+            if (!arxiv_id.empty()) {
+                // 查找或注册 arxiv paper 实体
+                std::string paper_eid = cm.register_entity(
+                    "paper", arxiv_id, {}, {}, json::object(), ""
+                );
+                cm.add_relation(story_eid, paper_eid, "mentions", 0.9, "hn", hnId);
+            }
+        }
+    }
+
+    return WrapMcpResult(payload);
 }
 
 } // namespace github_research

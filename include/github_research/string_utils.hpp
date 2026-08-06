@@ -21,4 +21,7 @@ bool iequals(const std::string& a, const std::string& b);
 // 拼接 query string,params 已 URL 编码
 std::string build_query(const std::map<std::string, std::string>& params);
 
+// Base64 解码(用于 GitHub Contents API 返回的 base64 编码文件内容)
+std::string base64_decode(const std::string& encoded);
+
 } // namespace github_research

@@ -36,6 +36,12 @@ public:
                          int max_depth = 3,
                          bool recursive = true);
 
+    // 3b. 获取原始 tree JSON(供 fetch_repo_detail 解析目录结构使用)
+    // 返回 GitHub Git Trees API 的原始 JSON,包含完整 path 字段
+    json get_tree_raw(const std::string& owner, const std::string& repo,
+                      const std::string& branch = "main",
+                      bool recursive = true);
+
     // 4. github_get_languages
     json get_languages(const std::string& owner, const std::string& repo);
 
@@ -98,6 +104,103 @@ public:
                       const std::string& order = "desc",
                       int limit = 30,
                       int page = 1);
+
+    // === 分层渐进挖掘工具(新增,与 HN/arXiv 对称) ===
+
+    // 13. github_search_index - 轻量索引(结构化,只返回精简元数据)
+    // query: 搜索关键词(可含 language:、stars:、topic: 等限定符)
+    // language: 语言过滤(空表示不限)
+    // sort: stars / forks / updated(空表示 best-match)
+    // max_results: 返回上限(1-50)
+    // 返回: [{repo_id, full_name, description, language, stars, topics}]
+    json search_index(const std::string& query,
+                      const std::string& language = "",
+                      const std::string& sort = "stars",
+                      int max_results = 20);
+
+    // 14. github_fetch_repo_detail - 单仓库深度挖掘
+    // owner/repo: 仓库坐标
+    // fetch_tech_stack: 读取依赖文件(requirements.txt/package.json/Cargo.toml/go.mod/pom.xml)
+    // fetch_code_structure: 解析目录树识别核心模块
+    // fetch_top_contributors: 拉取 top N 贡献者
+    // fetch_dependencies: 从依赖文件提取直接依赖列表
+    // max_contributors: 贡献者上限(1-30)
+    // 返回: {repo_full_name, description, stars, language, topics,
+    //        tech_stack:{runtime,framework,database,devops,testing},
+    //        tech_blocks:[{name,path,purpose,files_count}],
+    //        top_contributors:[{login,contributions}],
+    //        direct_dependencies:[]}
+    json fetch_repo_detail(const std::string& owner,
+                           const std::string& repo,
+                           bool fetch_tech_stack = true,
+                           bool fetch_code_structure = true,
+                           bool fetch_top_contributors = true,
+                           bool fetch_dependencies = true,
+                           int max_contributors = 15);
+
+    // 15. github_fetch_relation_network - 二级递进关联网络挖掘
+    // owner/repo: 目标仓库坐标
+    // find_similar_repos: 基于技术栈/topics 构造 query 搜索相似项目
+    // similar_by_tech_stack / similar_by_topic: 相似度匹配维度
+    // max_similar: 相似项目上限(1-20)
+    // explore_developer_links: 从贡献者出发查找关联项目
+    // developer_depth: 开发者关联扩散深度(1-2,2 表示二级递进)
+    // 返回: {repo_full_name,
+    //        similar_repos:[{full_name,similarity_score,match_breakdown,shared_dependencies}],
+    //        developer_related_repos:[{full_name,shared_developers,relation_level,stars}]}
+    json fetch_relation_network(const std::string& owner,
+                                const std::string& repo,
+                                bool find_similar_repos = true,
+                                bool similar_by_tech_stack = true,
+                                bool similar_by_topic = true,
+                                int max_similar = 10,
+                                bool explore_developer_links = true,
+                                int developer_depth = 2);
+
+    // === 局部对象连续动态分析索引 (next2) ===
+
+    // 16. github_ingest_commit_timeline - 拉取单 commit 详情,解析所有文件变更,
+    //     写入 file_timeline + file_cooccurrence
+    // commit_hash: 单个 commit SHA
+    // 返回: 写入的 file_timeline 记录数
+    int ingest_commit_file_timeline(const std::string& owner,
+                                     const std::string& repo,
+                                     const std::string& commit_hash);
+
+    // 17. github_ingest_recent_commits_timeline - 批量增量抓取近 N 天 commits,
+    //     逐个写入 file_timeline + file_cooccurrence
+    // since_days: 拉取近 N 天的 commits
+    // branch: 分支名(空表示默认分支)
+    // max_commits: 单次最多处理的 commit 数(防止 API 超限)
+    // 返回: 新增的 file_timeline 记录总数
+    int ingest_recent_commits_timeline(const std::string& owner,
+                                        const std::string& repo,
+                                        int since_days = 365,
+                                        const std::string& branch = "",
+                                        int max_commits = 100);
+
+    // 18. github_module_timeline_analysis - 三层职责统一入口
+    //   target_type: "file" / "module" / "signature"
+    //   target_path: 文件路径(file 类型时必填)
+    //   module_name: 模块名(module 类型时必填)
+    //   signature_regex: 代码特征(signature 类型时必填,简单子串匹配)
+    //   time_range: "1y" / "180d" / "90d" / "30d"
+    //   layer: 1=轻量索引层(只返回候选) 2=定点深挖(完整时序) 3=二级递进(向外扩散)
+    //   ingest_first: 若本地无数据,先增量抓取 commits
+    // 返回结构按 layer 不同:
+    //   layer=1: {candidates:[{file_path,module_name,change_count,last_commit_time}]}
+    //   layer=2: {timeline:[...], contributor_rank:[...], related_files:[...],
+    //             change_density:[...]}
+    //   layer=3: layer=2 全部 + {developer_modules:{user:[...]}, coupled_clusters:[...]}
+    json module_timeline_analysis(const std::string& owner,
+                                   const std::string& repo,
+                                   const std::string& target_type,
+                                   const std::string& target_path = "",
+                                   const std::string& module_name = "",
+                                   const std::string& signature_regex = "",
+                                   const std::string& time_range = "1y",
+                                   int layer = 2,
+                                   bool ingest_first = true);
 
     // WebView2 是否就绪
     bool is_ready() const { return http_client_.is_ready(); }

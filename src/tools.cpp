@@ -98,7 +98,8 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
 
     // github_search_* 工具只需要 query,不需要 owner/repo
     bool is_search = (tool_name == "github_search_repositories" ||
-                      tool_name == "github_search_users");
+                      tool_name == "github_search_users" ||
+                      tool_name == "github_search_index");
 
     if (!is_search) {
         // 所有非搜索 tool 都需要 owner 和 repo
@@ -239,6 +240,126 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
             int page = get_int_arg(args, "page", 1, 1, 10, err);
             if (!err.empty()) return make_error_result(err);
             json r = client.search_users(query, sort, order, limit, page);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_search_index") {
+            // 分层渐进挖掘 - 第一层:轻量索引
+            std::string query = get_string_arg(args, "query", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string language = get_string_arg(args, "language", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string sort = get_string_arg(args, "sort", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            if (sort.empty()) sort = "stars";
+            int max_results = get_int_arg(args, "max_results", 20, 1, 50, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.search_index(query, language, sort, max_results);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_fetch_repo_detail") {
+            // 分层渐进挖掘 - 第二层:单仓库深度挖掘
+            bool fetch_tech_stack = true;
+            bool fetch_code_structure = true;
+            bool fetch_top_contributors = true;
+            bool fetch_dependencies = true;
+            if (args.contains("fetch_tech_stack") && args["fetch_tech_stack"].is_boolean())
+                fetch_tech_stack = args["fetch_tech_stack"].get<bool>();
+            if (args.contains("fetch_code_structure") && args["fetch_code_structure"].is_boolean())
+                fetch_code_structure = args["fetch_code_structure"].get<bool>();
+            if (args.contains("fetch_top_contributors") && args["fetch_top_contributors"].is_boolean())
+                fetch_top_contributors = args["fetch_top_contributors"].get<bool>();
+            if (args.contains("fetch_dependencies") && args["fetch_dependencies"].is_boolean())
+                fetch_dependencies = args["fetch_dependencies"].get<bool>();
+            int max_contributors = get_int_arg(args, "max_contributors", 15, 1, 30, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.fetch_repo_detail(owner, repo, fetch_tech_stack,
+                                              fetch_code_structure, fetch_top_contributors,
+                                              fetch_dependencies, max_contributors);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_fetch_relation_network") {
+            // 分层渐进挖掘 - 第三层:二级递进关联网络
+            bool find_similar = true;
+            bool similar_by_tech = true;
+            bool similar_by_topic = true;
+            bool explore_dev = true;
+            if (args.contains("find_similar_repos") && args["find_similar_repos"].is_boolean())
+                find_similar = args["find_similar_repos"].get<bool>();
+            if (args.contains("similar_by_tech_stack") && args["similar_by_tech_stack"].is_boolean())
+                similar_by_tech = args["similar_by_tech_stack"].get<bool>();
+            if (args.contains("similar_by_topic") && args["similar_by_topic"].is_boolean())
+                similar_by_topic = args["similar_by_topic"].get<bool>();
+            if (args.contains("explore_developer_links") && args["explore_developer_links"].is_boolean())
+                explore_dev = args["explore_developer_links"].get<bool>();
+            int max_similar = get_int_arg(args, "max_similar", 10, 1, 20, err);
+            if (!err.empty()) return make_error_result(err);
+            int dev_depth = get_int_arg(args, "developer_depth", 2, 1, 2, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.fetch_relation_network(owner, repo, find_similar,
+                                                   similar_by_tech, similar_by_topic,
+                                                   max_similar, explore_dev, dev_depth);
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_ingest_commit_timeline") {
+            // 局部对象连续动态分析索引 - 单 commit 文件变更入库
+            std::string commit_hash = get_string_arg(args, "commit_hash", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            int n = client.ingest_commit_file_timeline(owner, repo, commit_hash);
+            json r = {
+                {"success", true},
+                {"repo_full_name", owner + "/" + repo},
+                {"commit_hash", commit_hash},
+                {"records_inserted", n}
+            };
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_ingest_recent_commits_timeline") {
+            // 局部对象连续动态分析索引 - 批量增量抓取近 N 天 commits
+            int since_days = get_int_arg(args, "since_days", 365, 1, 365, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string branch = get_string_arg(args, "branch", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            int max_commits = get_int_arg(args, "max_commits", 100, 1, 500, err);
+            if (!err.empty()) return make_error_result(err);
+            int n = client.ingest_recent_commits_timeline(owner, repo, since_days, branch, max_commits);
+            json r = {
+                {"success", true},
+                {"repo_full_name", owner + "/" + repo},
+                {"since_days", since_days},
+                {"records_inserted", n}
+            };
+            return make_success_result(r.dump());
+
+        } else if (tool_name == "github_module_timeline_analysis") {
+            // 局部对象连续动态分析索引 - 三层职责统一入口
+            std::string target_type = get_string_arg(args, "target_type", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            if (target_type != "file" && target_type != "module" && target_type != "signature") {
+                return make_error_result("invalid target_type: must be file/module/signature");
+            }
+            std::string target_path = get_string_arg(args, "target_path", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string module_name = get_string_arg(args, "module_name", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string signature_regex = get_string_arg(args, "signature_regex", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            std::string time_range = get_string_arg(args, "time_range", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            if (time_range.empty()) time_range = "1y";
+            if (time_range != "1y" && time_range != "180d" &&
+                time_range != "90d" && time_range != "30d") {
+                return make_error_result("invalid time_range: must be 1y/180d/90d/30d");
+            }
+            int layer = get_int_arg(args, "layer", 2, 1, 3, err);
+            if (!err.empty()) return make_error_result(err);
+            bool ingest_first = true;
+            if (args.contains("ingest_first") && args["ingest_first"].is_boolean()) {
+                ingest_first = args["ingest_first"].get<bool>();
+            }
+            json r = client.module_timeline_analysis(owner, repo, target_type,
+                                                      target_path, module_name,
+                                                      signature_regex, time_range,
+                                                      layer, ingest_first);
             return make_success_result(r.dump());
 
         } else {

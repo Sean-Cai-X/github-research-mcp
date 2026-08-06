@@ -2,14 +2,18 @@
 add_executable(test_smoke
     test_smoke.cpp
     ${CMAKE_SOURCE_DIR}/src/github_client.cpp
+    ${CMAKE_SOURCE_DIR}/src/cache_manager.cpp
+    ${CMAKE_SOURCE_DIR}/src/source_fusion.cpp
     ${CMAKE_SOURCE_DIR}/src/webview_client.cpp
     ${CMAKE_SOURCE_DIR}/src/formatters.cpp
     ${CMAKE_SOURCE_DIR}/src/string_utils.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/sqlite/sqlite3.c
 )
 target_include_directories(test_smoke PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${JSON_INCLUDE_DIR}
     ${WEBVIEW2_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/sqlite
 )
 
 if(TARGET nlohmann_json::nlohmann_json)

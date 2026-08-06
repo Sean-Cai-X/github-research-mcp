@@ -1,48 +1,73 @@
 # github-research-mcp (DeerFlow++)
 
-8 源统一研究 MCP 服务,基于 **单一 WebView2 技术栈**。
+8 源统一研究 MCP 服务,基于 **单一 WebView2 技术栈** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)**。
 
 ## 特性
 
-- **8 源 49 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **8 源 59 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
 - **单一技术栈**:一个基类 `WebViewSession`,一种调用模式 `Navigate + ExecuteScript`,一种错误处理范式,一种日志输出格式,一种限流策略
 - **无 HTTP API 依赖**:不混入 WinHTTP / libcurl / cpr,避免两套网络层 / 两套错误处理 / 两套限流逻辑 / 两套调试方式
 - **统一原始文本提取**:所有工具统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI,工具不做复杂选择器适配
-- **多实例会话隔离**:每个数据源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享
+- **多实例会话隔离**:每个数据源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
 - **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
 - **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
+- **统一 SQLite 缓存层(WAL + 5 张表)**:cache_entries / cache_blobs / entities / relations / metrics
+- **多源融合 + 字段级策略**:UNION / LATEST,自动按 source reliability 排序
+- **熔断器 + 降级链**:主源失败自动切换备用源,所有源失败返回陈旧缓存(stale)
+- **Entity Mapper + 关系图谱**:自动注册实体、建立跨源关系、记录时间快照
+- **三层观测体系**:L1 项目概览(13 个 github_* 工具) / L2 单点深挖(局部对象连续动态分析索引) / L3 关联图谱(跨源 entity + relations)
+- **跨源闭合**:HN story 自动检测 `source_url` 中的 arxiv.org,建立 `story -[mentions]-> paper` 跨源关系
 
 ## 架构
 
-### 单一技术栈原则
+### 单一技术栈 + 三层观测体系
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    MCP Server (HTTP/stdio)              │
-└────────────┬────────────────────────────────────────────┘
-             │ JSON-RPC 2.0 dispatch
-             ▼
-┌─────────────────────────────────────────────────────────┐
-│  dispatch_<source>_tool  (按工具名前缀路由)              │
-│  github_* / arxiv_* / hn_* / pkg_* / pwc_* /            │
-│  hf_*   / s2_*    / so_*                                │
-└────────────┬────────────────────────────────────────────┘
-             │
-   ┌─────────┼─────────┬─────────┬─────────┬─────────┐
-   ▼         ▼         ▼         ▼         ▼         ▼
+┌────────────────────────────────────────────────────────────────┐
+│              MCP Server (HTTP/stdio)                            │
+└────────────────┬───────────────────────────────────────────────┘
+                 │ JSON-RPC 2.0 dispatch
+                 ▼
+┌────────────────────────────────────────────────────────────────┐
+│  dispatch_<source>_tool  (按工具名前缀路由)                      │
+│  github_* (18) / arxiv_* (6) / hn_* (7) / pkg_* (4) /          │
+│  pwc_*   (5) / hf_*   (7) / s2_*    (6) / so_*    (5)          │
+│  + github_module_timeline_analysis (L2/L3)                      │
+│  + github_fetch_repo_detail / github_fetch_relation_network     │
+│  + github_search_index / github_ingest_*                        │
+└────────────────┬───────────────────────────────────────────────┘
+                 │
+   ┌─────────────┼─────────────┬─────────────┬─────────────┐
+   ▼             ▼             ▼             ▼             ▼
 ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
 │GitHub│ │arXiv │ │  HN  │ │ Pkg  │ │ PWC  │ │ ...  │
 │Client│ │Session│ │Session│ │Session│ │Session│ │ ...
+│  +   │ │  +   │ │  +   │ │      │ │      │ │
+│Cache │ │Cache │ │Cache │ │Cache │ │Cache │ │
+│ +Entity +Entity +Entity                                    │
 └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
    │        │        │        │        │        │
    └────────┴────────┴────────┴────────┴────────┘
                          │
-                         ▼
-              ┌─────────────────────┐
-              │  WebView2 基类       │
-              │  Navigate + Execute │
-              │  Script             │
-              └─────────────────────┘
+        ┌────────────────┴────────────────┐
+        ▼                                 ▼
+┌──────────────────┐         ┌──────────────────────────┐
+│  WebView2 基类    │         │  SQLite 统一缓存层         │
+│  Navigate + Exec │         │  - cache_entries/blobs    │
+│  Script          │         │  - entities / relations   │
+│                  │         │  - metrics (时间序列)      │
+│                  │         │  + source_fusion           │
+│                  │         │  + circuit breaker         │
+│                  │         │  + fallback chain          │
+└──────────────────┘         └──────────────────────────┘
+                                       │
+                                       ▼
+                          ┌──────────────────────────┐
+                          │  三层观测体系              │
+                          │  L1: 项目概览 (github_*)  │
+                          │  L2: 单点深挖 (timeline)   │
+                          │  L3: 关联图谱 (跨源)       │
+                          └──────────────────────────┘
 ```
 
 ### 调用模式(所有源统一)
@@ -51,6 +76,8 @@
 2. `WaitForNavigation(timeoutMs)` —— 等待 NavigationCompleted(pump 消息循环)
 3. `ExecuteScript(kJsExtractRawPage)` —— 执行统一 JS 提取原始页面文本
 4. 返回 `{success, url, title, text, html}` 给 MCP 客户端,AI 自行解析
+5. **缓存层透明拦截**:成功/失败都写入 SQLite,下次同 URL 命中直接返回
+6. **Entity Mapper 自动注册**:成功结果自动抽取实体字段、建立关系、记录时间快照
 
 **统一 JS 脚本** `kJsExtractRawPage`(定义在 `webview_helpers.hpp`):
 
@@ -74,20 +101,173 @@
 
 **不使用** `fetch()` / `XMLHttpRequest`(WebView2 ExecuteScript 不 await Promise,同步 XHR 被 Chromium 限制)。
 
-### 会话隔离
+### 会话隔离(每个源独立 WebView2 + user data dir)
 
-每个数据源独立 `WebViewSession` 实例 + 独立 user data dir:
+| 源 | 类 | user data dir 参数 | 数据源 ID |
+|---|---|---|---|
+| GitHub | `WebViewClient`(基于 `WebViewSession`) | `--gh-profile` | `github_api` |
+| arXiv | `WebViewSession` | `--arxiv-profile` | `arxiv_web` |
+| Hacker News | `WebViewSession` | `--hn-profile` | `hn_web` |
+| npm/PyPI | `WebViewSession` | `--pkg-profile` | `pkg_web` |
+| Papers with Code | `WebViewSession` | `--pwc-profile` | `pwc_web` |
+| Hugging Face | `WebViewSession` | `--hf-profile` | `hf_web` |
+| Semantic Scholar | `WebViewSession` | `--s2-profile` | `s2_web` |
+| Stack Overflow | `WebViewSession` | `--so-profile` | `so_web` |
 
-| 源 | 类 | user data dir 参数 |
-|---|---|---|
-| GitHub | `WebViewClient`(基于 `WebViewSession`) | `--gh-profile` |
-| arXiv | `WebViewSession` | `--arxiv-profile` |
-| Hacker News | `WebViewSession` | `--hn-profile` |
-| npm/PyPI | `WebViewSession` | `--pkg-profile` |
-| Papers with Code | `WebViewSession` | `--pwc-profile` |
-| Hugging Face | `WebViewSession` | `--hf-profile` |
-| Semantic Scholar | `WebViewSession` | `--s2-profile` |
-| Stack Overflow | `WebViewSession` | `--so-profile` |
+## 统一 SQLite 缓存层(WAL + 5 张表)
+
+### 表结构
+
+| 表 | 作用 |
+|---|---|
+| `cache_entries` | 缓存主表(source_type + cache_key 唯一,含 fetch_status / hit_count / TTL) |
+| `cache_blobs` | 大 payload 存储(>4000 chars 自动外存) |
+| `entities` | 实体索引(type + canonical_name,含 aliases / tags / attrs) |
+| `relations` | 关系边(src_eid + dst_eid + relation_type + weight) |
+| `metrics` | 时间序列(entity_id + metric_name + value + delta_from_prev) |
+| `sources` | 数据源注册表(reliability / avg_latency / consecutive_failures / enabled) |
+| `source_fusion` | 字段级融合存储(entity_id + source_id + field_name + value + weight) |
+| `fallback_policies` | 降级策略(entity_type + fallback_chain + stale_ttl_hours) |
+
+### 缓存读写流程
+
+```cpp
+// 读:命中"ok"且未过期 → 返回;否则继续抓取
+auto cached = cm.get("arxiv", "paper:2401.01330");
+if (cached && cached->fetch_status == "ok" && cm.is_fresh("arxiv", cache_key)) {
+    return parse(cached->payload);  // cache_hit
+}
+
+// 写:成功(TTL=72h) / 失败(TTL=1h,避免重复回源)
+cm.put("arxiv", "paper:2401.01330", payload, "json", 72, "", "ok", "");
+cm.put("arxiv", "paper:2401.01330", "",        "json", 1,  "", "failed", "network_error");
+```
+
+### Entity Mapper + 关系图谱
+
+每个源的成功结果自动抽取实体并建立关系:
+
+| 源 | 实体类型 | 关系类型 | 时间快照 |
+|---|---|---|---|
+| GitHub | `project` / `person` | `depends_on` / `authored_by` | stars / commits |
+| arXiv | `paper` | `authored_by` | citations / downloads |
+| Hacker News | `topic` / `comment` | `discussed_in` / `mentions` | score / comment_count |
+| npm/PyPI | `package` | `depends_on` / `authored_by` | weekly_downloads |
+| Papers with Code | `paper` / `task` / `dataset` | `evaluated_on` / `proposes_method` | sota_score |
+| Hugging Face | `model` / `dataset` | `derived_from` / `evaluated_on` | downloads / likes |
+| Semantic Scholar | `paper` / `person` | `cites` / `authored_by` | citations / influential_count |
+| Stack Overflow | `question` / `answer` / `tag` | `answered_by` / `tagged_with` | score / view_count |
+
+### 跨源闭合(自动建立跨源关系)
+
+HN 工具在抓取 story 时自动检测 `source_url`,若指向 arxiv.org 则提取 arxiv_id 并建立 `story -[mentions]-> paper` 关系:
+
+```cpp
+// hackernews_tools.cpp
+if (sourceUrl.find("arxiv.org") != std::string::npos) {
+    // 从 https://arxiv.org/abs/2510.01395 提取 arxiv_id = "2510.01395"
+    std::string arxiv_id = extract_arxiv_id(sourceUrl);
+    if (!arxiv_id.empty()) {
+        std::string paper_eid = cm.register_entity("paper", arxiv_id, ...);
+        cm.add_relation(story_eid, paper_eid, "mentions", 0.9, "hn", hnId);
+    }
+}
+```
+
+跨源图谱遍历示例:`hn_story → (mentions) → arxiv_paper → (authored_by) → person`
+
+## 多源融合 + 熔断降级链
+
+### 数据源注册 + source_fetch 回调
+
+每个源在 `McpServer` 构造时注册数据源和 `source_fetch` 回调:
+
+```cpp
+// mcp_server.cpp
+cm.register_source("github_api", "api", "https://api.github.com",
+                    0.9 /* reliability */, 200 /* avg_latency_ms */,
+                    5000 /* max_calls_per_hour */, 1.0 /* priority */, "{}");
+cm.register_source_fetch("github_api",
+    [client_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+        // entity_key = "owner/repo",通过 CleanerPipeline 提取标准化 fields
+        json repo_info = client_ptr->get_repo_info(owner, repo);
+        CleanerPipeline cleaner;
+        return cleaner.clean(repo_info, "github_api");
+    });
+```
+
+### 字段级融合(UNION / LATEST 策略)
+
+```cpp
+// 注册实体来源(支持多源同一实体)
+cm.register_entity_source(eid, "github_api", "owner/repo",
+    {"stars", "description", "topics"}, 0.9);
+
+// 写入字段(自动按 source reliability 加权)
+cm.put_entity_fields(eid, "github_api", {
+    {"stars", 100}, {"description", "GitHub desc"}
+}, 0.9);
+
+// 读取融合后的字段(UNION 默认 / LATEST 取最新)
+auto fields = cm.get_entity_fields(eid);
+```
+
+### 熔断器 + 降级链
+
+```cpp
+// 设置降级策略:主源 → 备用源1 → 备用源2 → 陈旧缓存
+cm.set_fallback_policy("project",
+    {"github_api", "npm_registry", "hn_search"},  // fallback chain
+    "",                     // field_filter(空=全部)
+    0.3,                    // min_reliability(低于此值不启用)
+    true,                   // allow_stale(允许返回陈旧缓存)
+    168                     // stale_ttl_hours(7天)
+);
+
+// 主源失败时自动切换:
+// 1. record_source_result("github_api", false) 递增 consecutive_failures
+// 2. 超过阈值 → 标记 enabled=false,熔断
+// 3. get_fallback_chain("project") 返回下一个可用源
+// 4. 所有源失败 → 返回陈旧缓存(若 allow_stale=true)
+```
+
+## 三层观测体系
+
+### L1: 项目概览(13 个 github_* 工具)
+
+提供仓库级、PR 级、issue 级的概览数据。对应原 49 个工具中的 github_* 系列。
+
+### L2: 单点深挖(局部对象连续动态分析索引)
+
+通过 `github_module_timeline_analysis` + `github_ingest_commit_timeline` + `github_ingest_recent_commits_timeline` 实现:
+
+```
+github_ingest_commit_timeline       → 拉取单个 commit 的文件变更
+github_ingest_recent_commits_timeline → 批量拉取最近 N 天的 commit 时间线
+github_module_timeline_analysis      → 三层职责统一分析入口:
+  - target_type=file    → 单文件变更历史 + contributor_rank + change_density
+  - target_type=module  → 模块级聚合(按目录前缀)
+  - target_type=signature → 函数签名级(正则匹配)
+  - layer=1/2/3         → 控制分析深度(related_files / contributor_rank / change_density)
+```
+
+### L3: 关联图谱(跨源 entity + relations)
+
+通过 `github_fetch_relation_network` + `github_search_index` 实现:
+
+```
+github_search_index              → 实体检索(type / tags / aliases 模糊匹配)
+github_fetch_repo_detail         → 仓库详情(融合多源字段)
+github_fetch_relation_network    → 关系网络遍历(深度可配,默认 3 层)
+```
+
+跨源图谱示例(HN story 自动 mentions arXiv paper):
+
+```
+hn_story:49186720 ─[mentions]─→ arxiv_paper:2510.01395 ─[authored_by]─→ person:Myra Cheng
+       │                              │
+       └─[discussed_in]─→ hn_comment   └─[cited_by]─→ s2_paper:...
+```
 
 ## 环境要求
 
@@ -102,6 +282,7 @@
 |---|---|
 | WebView2 SDK | NuGet 包 `Microsoft.Web.WebView2`,解压到 `third_party/WebView2/` |
 | nlohmann/json | vcpkg 安装,或单 header 放到 `third_party/json/include/` |
+| SQLite | 源码已内置 `third_party/sqlite/sqlite3.c` |
 
 ## 构建
 
@@ -114,6 +295,7 @@ cmake --build build --config Release
 构建产物:
 - `build/Release/research-mcp.exe`
 - `build/Release/WebView2Loader.dll`
+- `build/tests/Release/test_smoke.exe`
 
 ## 启动
 
@@ -121,6 +303,15 @@ cmake --build build --config Release
 
 ```powershell
 .\research-mcp.exe --port 9876 --proxy http://127.0.0.1:7897
+```
+
+### arXiv + HN 双源模式(推荐最小化验证)
+
+```powershell
+.\research-mcp.exe --port 8765 `
+  --arxiv-profile ./profiles/arxiv `
+  --hn-profile    ./profiles/hn `
+  --proxy http://127.0.0.1:7897
 ```
 
 ### 8 源全量模式(推荐)
@@ -141,18 +332,16 @@ cmake --build build --config Release
 启动成功日志:
 
 ```
+[cache] ready: {"blobs":1,"cache_entries":5,"entity_count":13,...}
 [mcp] proxy: http://127.0.0.1:7897
-[mcp] init GitHub profile: ./profiles/gh
 [mcp] init arXiv session: ./profiles/arxiv
 [session] WebView2 ready, profile: ./profiles/arxiv
 [mcp] arXiv session ready
+[mcp] arxiv source_fetch callback registered
 [mcp] init HN session: ./profiles/hn
 [session] WebView2 ready, profile: ./profiles/hn
 [mcp] HackerNews session ready
-...
-[mcp] init SO session: ./profiles/so
-[session] WebView2 ready, profile: ./profiles/so
-[mcp] StackOverflow session ready
+[mcp] hn source_fetch callback registered
 [mcp] server starting in HTTP mode on port 8765
 [http] MCP server listening on http://127.0.0.1:8765/mcp (Ctrl+C to stop)
 ```
@@ -171,6 +360,8 @@ cmake --build build --config Release
 | `--hf-profile <DIR>` | 启用 Hugging Face WebView 会话 |
 | `--s2-profile <DIR>` | 启用 Semantic Scholar WebView 会话 |
 | `--so-profile <DIR>` | 启用 Stack Overflow WebView 会话 |
+| `--cache-smoke-test` | 运行 127 项缓存层烟雾测试(不依赖 WebView2) |
+| `--help` / `-h` | 显示帮助 |
 
 未指定 `--xxx-profile` 的源不启用,对应工具调用返回 `session not initialized`。
 
@@ -206,77 +397,161 @@ $env:HTTP_PROXY  = "http://127.0.0.1:7897"
 ### tools/list
 
 ```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
-  -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"
+$body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+"tools count: $($r.result.tools.Count)"
+# → tools count: 59
 ```
 
-### arXiv 可用性检查
+### arXiv 论文详情(支持 cache_hit)
 
 ```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
-  -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"arxiv_check_available\",\"arguments\":{}}}"
+$body = '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arxiv_fetch_paper_detail","arguments":{"arxiv_id":"2401.01330","fetch_full_text":false}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
+$r.result.content[0].text
 ```
 
-响应:
+首次调用返回(无 `cache_hit` 字段):
 
 ```json
 {
-  "id": 2, "jsonrpc": "2.0",
-  "result": {
-    "content": [{"type":"text","text":"{\"available\":true,\"page_title\":\"arXiv.org e-Print archive\",\"success\":true}"}],
-    "isError": false
-  }
+  "arxiv_id": "2401.01330",
+  "title": "TREC iKAT 2023: The Interactive Knowledge Assistance Track Overview",
+  "authors": "Mohammad Aliannejadi, ...",
+  "abstract_full": "...",
+  "primary_category": "Information Retrieval (cs.IR)",
+  "pdf_url": "https://arxiv.org/pdf/2401.01330",
+  "submitted_date": "[Submitted on 2 Jan 2024 ...]",
+  "success": true
 }
 ```
 
-### Hacker News 头条
+二次调用返回(命中缓存,`cache_hit=true`,`cache_expires_at` 给出过期时间戳):
 
-```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
-  -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"hn_get_top_stories\",\"arguments\":{\"count\":3}}}"
+```json
+{
+  "arxiv_id": "2401.01330",
+  "title": "...",
+  "cache_hit": true,
+  "cache_expires_at": 1786248093,
+  "success": true
+}
 ```
 
-### GitHub 仓库信息
+### Hacker News story 详情(自动建立跨源 mentions 关系)
 
 ```powershell
-curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
-  -H "Content-Type: application/json" ^
-  -d "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"github_get_repo_info\",\"arguments\":{\"owner\":\"bytedance\",\"repo\":\"deer-flow\"}}}"
+# 找一个 source_url 指向 arxiv.org 的 story
+$body = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hn_fetch_detailed_story","arguments":{"hn_id":"49186720","fetch_comments":false,"fetch_external_article":false}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
+$r.result.content[0].text
 ```
 
-## 工具列表(49 个)
+返回(注意 `source_url`):
 
-### GitHub(13 个)
+```json
+{
+  "hn_id": "49186720",
+  "title": "Sycophantic AI Decreases Prosocial Intentions and Promotes Dependence (2025)",
+  "source_url": "https://arxiv.org/abs/2510.01395",
+  "article_fetch_status": "disabled",
+  "comment_count": 0,
+  "success": true
+}
+```
 
-| 工具 | 说明 |
-|---|---|
-| `github_get_repo_info` | 仓库基础信息 |
-| `github_get_readme` | README 全文(markdown) |
-| `github_get_tree` | 目录树(格式化文本) |
-| `github_get_languages` | 语言分布 |
-| `github_get_contributors` | 贡献者列表 |
-| `github_get_commits` | 近期提交(支持 `branch` / `sha` 参数查询非默认分支) |
-| `github_get_branches` | 全部分支列表(用于按分支汇总提交时间线) |
-| `github_get_issues` | Issues 列表 |
-| `github_get_pull_requests` | PR 列表 |
-| `github_get_releases` | 发布历史 |
-| `github_summarize_repo` | 综合摘要 |
-| `github_search_repositories` | 按项目名 / 语言 / topic / stars 搜索仓库(trending / discovery) |
-| `github_search_users` | 按作者名 / 组织 / 地区 / 粉丝数搜索用户 |
+调用后 `entity_mapper` 自动:
+1. 注册 `topic:49186720` 实体
+2. 从 `source_url` 提取 `arxiv_id=2510.01395`
+3. 注册 `paper:2510.01395` 实体
+4. 建立 `topic ─[mentions, weight=0.9]→ paper` 跨源关系
 
-### arXiv(4 个)
+### GitHub 模块时间线分析(L2 单点深挖)
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"github_module_timeline_analysis","arguments":{"owner":"bytedance","repo":"deer-flow","target_type":"file","target_path":"src/graph/builder.py","time_range":"90d","layer":2,"ingest_first":true}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 240
+$r.result.content[0].text
+```
+
+返回:
+
+```json
+{
+  "repo_full_name": "bytedance/deer-flow",
+  "target_type": "file",
+  "target_path": "src/graph/builder.py",
+  "time_range": "90d",
+  "layer": 2,
+  "timeline": [
+    {"sha": "...", "date": "2024-12-15", "author": "...", "message": "...", "files_changed": [...]}
+  ],
+  "timeline_count": 12,
+  "contributor_rank": [{"author": "...", "commits": 5, "files_changed": 23}],
+  "change_density": [{"month": "2024-12", "lines_added": 156, "lines_deleted": 42}],
+  "related_files": [{"path": "...", "co_change_count": 8}]
+}
+```
+
+### GitHub 仓库信息(主源失败时熔断 + 失败缓存)
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"github_get_repo_info","arguments":{"owner":"bytedance","repo":"deer-flow"}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 120
+"isError: $($r.result.isError)"
+$r.result.content[0].text
+```
+
+主源 WebView2 初始化失败时:
+
+```json
+{
+  "error": "WebView2 backend initialization failed (no fallback, single tech stack)",
+  "status_code": 0,
+  "url": "https://api.github.com/repos/bytedance/deer-flow"
+}
+```
+
+失败结果写入缓存(`fetch_status=failed`,TTL=1h),短时间内重复调用直接返回失败缓存,不再重复尝试 WebView2 初始化。
+
+## 工具列表(59 个)
+
+### GitHub(18 个)
+
+| 工具 | 说明 | 层 |
+|---|---|---|
+| `github_get_repo_info` | 仓库基础信息 | L1 |
+| `github_get_readme` | README 全文(markdown) | L1 |
+| `github_get_tree` | 目录树(格式化文本) | L1 |
+| `github_get_languages` | 语言分布 | L1 |
+| `github_get_contributors` | 贡献者列表 | L1 |
+| `github_get_commits` | 近期提交(支持 `branch` / `sha` 参数查询非默认分支) | L1 |
+| `github_get_branches` | 全部分支列表(用于按分支汇总提交时间线) | L1 |
+| `github_get_issues` | Issues 列表 | L1 |
+| `github_get_pull_requests` | PR 列表 | L1 |
+| `github_get_releases` | 发布历史 | L1 |
+| `github_summarize_repo` | 综合摘要 | L1 |
+| `github_search_repositories` | 按项目名 / 语言 / topic / stars 搜索仓库(trending / discovery) | L1 |
+| `github_search_users` | 按作者名 / 组织 / 地区 / 粉丝数搜索用户 | L1 |
+| `github_search_index` | 实体检索(type / tags / aliases 模糊匹配) | L3 |
+| `github_fetch_repo_detail` | 仓库详情(融合多源字段) | L3 |
+| `github_fetch_relation_network` | 关系网络遍历(深度可配) | L3 |
+| `github_ingest_commit_timeline` | 拉取单个 commit 的文件变更 | L2 |
+| `github_ingest_recent_commits_timeline` | 批量拉取最近 N 天的 commit 时间线 | L2 |
+| `github_module_timeline_analysis` | 三层职责统一分析入口(file/module/signature) | L2/L3 |
+
+### arXiv(6 个)
 
 | 工具 | 说明 |
 |---|---|
 | `arxiv_search_papers` | 按关键词 / 分类搜索论文 |
 | `arxiv_get_paper_detail` | 获取论文详情(标题、作者、摘要、PDF 链接) |
-| `arxiv_get_pdf_link` | 根据 arXiv ID 生成 PDF / abs 链接 |
+| `arxiv_get_pdf_link` | 根据 arXiv ID 生成 PDF / abs 链接(零网络) |
 | `arxiv_check_available` | 检查 arXiv 网站可用性 |
+| `arxiv_search_index` | 论文实体检索 |
+| `arxiv_fetch_paper_detail` | 论文详情 + cache_hit 标记 + entity_mapper 写入 |
 
-### Hacker News(5 个)
+### Hacker News(7 个)
 
 | 工具 | 说明 |
 |---|---|
@@ -285,6 +560,8 @@ curl.exe --noproxy "*" -X POST http://127.0.0.1:8765/mcp ^
 | `hn_get_best_stories` | 精选故事 |
 | `hn_get_item` | 获取单个 item(故事 / 评论) |
 | `hn_search_by_keyword` | 按关键词搜索 |
+| `hn_get_latest_index` | 最新索引快照 |
+| `hn_fetch_detailed_story` | 故事详情 + 跨源 mentions 关系自动建立 |
 
 ### npm / PyPI(4 个)
 
@@ -376,7 +653,7 @@ llama-server.exe ^
   --mcp http://127.0.0.1:8765/mcp
 ```
 
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 49 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 59 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
 
 ## 协议兼容性
 
@@ -388,7 +665,7 @@ llama-server.exe ^
 | 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
 | CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
 | OPTIONS 预检 | ✅ | 自动返回 200 |
-| `tools/list` | ✅ | 49 个工具(8 源) |
+| `tools/list` | ✅ | 59 个工具(8 源) |
 | `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
 | `ping` | ✅ | 心跳保活 |
 | `shutdown` | ✅ | 触发 server 优雅停止 |
@@ -413,6 +690,12 @@ GitHub 限流错误附带 `reset_at`:
 {"error":"ERROR: arXiv WebView session not initialized."}
 ```
 
+WebView2 后端初始化失败(无 fallback):
+
+```json
+{"error":"WebView2 backend initialization failed (no fallback, single tech stack)","status_code":0,"url":"..."}
+```
+
 ## 故障排查
 
 ### `WebView2 initialization timeout`
@@ -421,6 +704,7 @@ Edge Runtime 缺失或被沙箱阻止。检查:
 1. `reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv` 应返回版本号
 2. 在非沙箱环境(真实 Windows 终端)运行
 3. 设置 `WEBVIEW2_USER_DATA_DIR` 环境变量到可写目录
+4. 显式指定 `--gh-profile` / `--arxiv-profile` 等参数,避免使用默认路径
 
 ### `HTTP 403`(GitHub)
 
@@ -436,13 +720,68 @@ GitHub API 限流(每小时 60 次/未认证)。解决:
 
 WebView2 ExecuteScript 不 await Promise 的已知问题。本服务已改用 `Navigate + ExecuteScript` 模式(读取 `document.body.innerText`),不再使用 `fetch()` / `XMLHttpRequest`。如仍出现此错误,请确认使用最新构建的 exe。
 
+### 主源失败但备用源正常
+
+**这是设计预期行为**,不是 bug:
+- 每个 WebView 会话独立 user data dir,主源(GitHub)失败不影响 arXiv / HN 等备用源
+- 失败缓存写入 SQLite(TTL=1h),短时间内重复调用直接返回失败缓存,不再重复初始化 WebView2
+- 调用 `set_fallback_policy` 配置降级链后,主源失败自动切换备用源
+
 ## 测试
+
+### 缓存层烟雾测试(127 项,不依赖 WebView2)
+
+```powershell
+.\build\Release\research-mcp.exe --cache-smoke-test
+```
+
+测试覆盖:
+
+| 层 | 用例数 | 覆盖范围 |
+|---|---:|---|
+| L0 基础缓存 | 13 | put/get/is_fresh/invalidate/hit_count/big_payload/failed_status |
+| L1 多源融合 | 14 | register_source/get_source/record_source_result/fallback_chain |
+| L2 熔断+降级 | 14 | consecutive_failures/enable_disable/stale_cache/dynamic_priority |
+| L3 字段融合策略 | 18 | UNION/LATEST/reliability_weight/register_entity_source/put_entity_fields |
+| L4 清洗+搜索 | 22 | CleanerPipeline/cross_source_search/force_refresh |
+| L5 实体+关系+时间序列 | 22 | register_entity/find_entity/add_relation/traverse_graph/record_metric |
+| L6 arXiv/HN 真实接入 | 24 | paper cache(72h)/abs cache/story cache(12h)/authored_by/discussed_in/mentions 跨源闭合/失败缓存/时间序列 |
+
+预期输出:
+
+```
+[SMOKE PASS] get returns entry
+[SMOKE PASS] payload matches small
+...
+[SMOKE PASS] cross-source graph traverse >= 2 levels
+[SMOKE PASS] cross-source graph has nodes
+[SMOKE PASS] arxiv failed cache stored
+[SMOKE PASS] hn failed cache status
+[SMOKE PASS] arxiv paper metric timeseries
+[SMOKE PASS] hn story metric timeseries
+[SMOKE SUMMARY] pass=127 fail=0
+```
+
+### 单元测试
 
 ```powershell
 cd D:\DeerFlow\DeerFlow++
 cmake --build build --config Release --target test_smoke
-.\build\Release\test_smoke.exe
+.\build\tests\Release\test_smoke.exe
 ```
+
+### 真实网络端到端验证(需启动 Server)
+
+参见上文「验证调用」章节,关键验证点:
+
+| 验证项 | 期望结果 |
+|---|---|
+| `tools/list` 返回工具数 | 59 |
+| `arxiv_fetch_paper_detail` 首次调用 | 返回论文详情(无 `cache_hit` 字段) |
+| `arxiv_fetch_paper_detail` 二次调用 | `cache_hit=true` + `cache_expires_at` 时间戳 |
+| `hn_fetch_detailed_story` 返回 `source_url=arxiv.org` | 自动建立 `story -[mentions]-> paper` 跨源关系 |
+| `github_module_timeline_analysis` | 返回 `timeline_count > 0`(若仓库有近期提交) |
+| 主源 WebView2 失败时调用备用源 | 备用源(arXiv/HN)正常返回,主源错误隔离 |
 
 ## 与 DeerFlow 原版的差异
 
@@ -453,6 +792,10 @@ cmake --build build --config Release --target test_smoke
 | 浏览器指纹 | 无 | 完整(与 Edge 一致) |
 | 反爬能力 | 弱 | 强(真实浏览器) |
 | 数据源 | GitHub 单源 | 8 源统一接入 |
+| 缓存层 | 无 | SQLite WAL + 5 张表 + 127 项烟雾测试 |
+| 多源融合 | 无 | 字段级 UNION/LATEST 策略 + 熔断器 + 降级链 |
+| 关系图谱 | 无 | Entity Mapper + 跨源 mentions 自动建立 |
+| 三层观测 | 无 | L1 概览 / L2 单点深挖 / L3 关联图谱 |
 | 编排主体 | agent runtime | 本地 LLM 客户端 |
 | 平台 | 跨平台 | Windows 10/11 专属 |
 

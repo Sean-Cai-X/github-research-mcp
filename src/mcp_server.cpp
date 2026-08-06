@@ -2,6 +2,7 @@
 #include "github_research/string_utils.hpp"
 #include "github_research/errors.hpp"
 #include "github_research/http_server.hpp"
+#include "github_research/cache_manager.hpp"
 #include "github_research/arxiv_tools.hpp"
 #include "github_research/hackernews_tools.hpp"
 #include "github_research/package_tools.hpp"
@@ -25,7 +26,30 @@ namespace github_research {
 json dispatch_tool_call(GitHubClient& client, const json& params);
 
 McpServer::McpServer(std::optional<std::string> token, int timeout_seconds)
-    : client_(token, timeout_seconds) {}
+    : client_(token, timeout_seconds) {
+    // 注册 GitHub 数据源 + source_fetch 回调
+    // entity_key = "owner/repo",调用 get_repo_info 抓取并提取 fields
+    CacheManager& cm = CacheManager::instance();
+    cm.register_source("github_api", "api", "https://api.github.com",
+                        0.9, 200, 5000, 1.0, "{}");
+    GitHubClient* client_ptr = &client_;
+    cm.register_source_fetch("github_api",
+        [client_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+            // 解析 entity_key = "owner/repo"
+            size_t slash = entity_key.find('/');
+            if (slash == std::string::npos || slash == 0 || slash == entity_key.size() - 1) {
+                throw std::runtime_error("invalid github entity_key, expected owner/repo");
+            }
+            std::string owner = entity_key.substr(0, slash);
+            std::string repo = entity_key.substr(slash + 1);
+            json repo_info = client_ptr->get_repo_info(owner, repo);
+            if (!repo_info.is_object()) {
+                throw std::runtime_error("github fetch: empty repo_info");
+            }
+            CleanerPipeline cleaner;
+            return cleaner.clean(repo_info, "github_api");
+        });
+}
 
 McpServer::~McpServer() {
     shutdown_arxiv();
@@ -73,12 +97,77 @@ void McpServer::shutdown_session(std::unique_ptr<WebViewSession>& session,
 
 // ============ 各源 init/shutdown ============
 bool McpServer::init_arxiv(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(arxiv_session_, userDataDir, proxy_url, "arXiv");
+    bool ok = init_session(arxiv_session_, userDataDir, proxy_url, "arXiv");
+    if (ok) {
+        // 注册 arXiv 数据源 + source_fetch 回调
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("arxiv_web", "web_scrape", "https://arxiv.org",
+                            0.85, 1500, 100, 0.9, "{}");
+        // 回调:entity_key = arxiv_id,调用 ToolArxivFetchPaperDetail 抓取并提取 fields
+        // 注意:session 生命周期与 McpServer 一致,捕获裸指针安全
+        WebViewSession* session_ptr = arxiv_session_.get();
+        cm.register_source_fetch("arxiv_web",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("arxiv session not initialized");
+                json args = {{"arxiv_id", entity_key}, {"fetch_full_text", false}};
+                json result = ToolArxivFetchPaperDetail(*session_ptr, args);
+                // 从 MCP 包装结果中提取 payload
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            // 转换为 fields map(用 CleanerPipeline 的字段映射)
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "arxiv_web");
+                        } catch (...) {
+                            throw std::runtime_error("arxiv fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("arxiv fetch: empty result");
+            });
+        log("arxiv source_fetch callback registered");
+    }
+    return ok;
 }
 void McpServer::shutdown_arxiv() { shutdown_session(arxiv_session_, "arXiv"); }
 
 bool McpServer::init_hackernews(const std::wstring& userDataDir, const std::string& proxy_url) {
-    return init_session(hn_session_, userDataDir, proxy_url, "HackerNews");
+    bool ok = init_session(hn_session_, userDataDir, proxy_url, "HackerNews");
+    if (ok) {
+        // 注册 HN 数据源 + source_fetch 回调
+        CacheManager& cm = CacheManager::instance();
+        cm.register_source("hn_web", "web_scrape", "https://news.ycombinator.com",
+                            0.8, 800, 200, 0.8, "{}");
+        // 回调:entity_key = hn_id,调用 ToolHnFetchDetailedStory 抓取并提取 fields
+        WebViewSession* session_ptr = hn_session_.get();
+        cm.register_source_fetch("hn_web",
+            [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
+                if (!session_ptr) throw std::runtime_error("hn session not initialized");
+                json args = {{"hn_id", entity_key},
+                             {"fetch_external_article", false},
+                             {"fetch_comments", true}};
+                json result = ToolHnFetchDetailedStory(*session_ptr, args);
+                if (result.contains("content") && result["content"].is_array() &&
+                    !result["content"].empty()) {
+                    const json& content = result["content"][0];
+                    if (content.contains("text") && content["text"].is_string()) {
+                        try {
+                            json payload = json::parse(content["text"].get<std::string>());
+                            CleanerPipeline cleaner;
+                            return cleaner.clean(payload, "hn_web");
+                        } catch (...) {
+                            throw std::runtime_error("hn fetch: payload parse failed");
+                        }
+                    }
+                }
+                throw std::runtime_error("hn fetch: empty result");
+            });
+        log("hn source_fetch callback registered");
+    }
+    return ok;
 }
 void McpServer::shutdown_hackernews() { shutdown_session(hn_session_, "HackerNews"); }
 
@@ -107,7 +196,7 @@ bool McpServer::init_stackoverflow(const std::wstring& userDataDir, const std::s
 }
 void McpServer::shutdown_stackoverflow() { shutdown_session(so_session_, "StackOverflow"); }
 
-// ============ arXiv 工具分发(4 个工具) ============
+// ============ arXiv 工具分发(6 个工具: 4 原始 + 2 分层) ============
 json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& args) {
     // arxiv_get_pdf_link 是纯 ID 规则拼接,零网络请求,允许在无会话时使用
     if (tool_name == "arxiv_get_pdf_link") {
@@ -120,7 +209,7 @@ json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& ar
             };
         }
     }
-    // 其余 3 个工具(搜索/详情/连通性检测)需要浏览器会话
+    // 其余 5 个工具(搜索/详情/连通性/索引/深挖)需要浏览器会话
     if (!arxiv_session_) {
         return {
             {"content", json::array({{{"type", "text"}, {"text", "ERROR: arXiv session not initialized. Start server with --arxiv-profile <DIR>."}}})},
@@ -134,6 +223,10 @@ json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& ar
             return ToolArxivGetPaperDetail(*arxiv_session_, args);
         if (tool_name == "arxiv_check_available")
             return ToolArxivCheckAvailable(*arxiv_session_, args);
+        if (tool_name == "arxiv_search_index")
+            return ToolArxivSearchIndex(*arxiv_session_, args);
+        if (tool_name == "arxiv_fetch_paper_detail")
+            return ToolArxivFetchPaperDetail(*arxiv_session_, args);
     } catch (const std::exception& e) {
         return {
             {"content", json::array({{{"type", "text"}, {"text", std::string("ERROR: arxiv tool exception: ") + e.what()}}})},
@@ -146,15 +239,17 @@ json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& ar
     };
 }
 
-// ============ Hacker News 工具分发(5 个 hn_* 工具) ============
+// ============ Hacker News 工具分发(7 个 hn_* 工具: 5 原始 + 2 分层) ============
 json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args) {
     if (!hn_session_) return McpError("ERROR: HackerNews session not initialized. Start with --hn-profile <DIR>.");
     try {
-        if (tool_name == "hn_get_top_stories")    return ToolHnGetTopStories(*hn_session_, args);
-        if (tool_name == "hn_get_new_stories")    return ToolHnGetNewStories(*hn_session_, args);
-        if (tool_name == "hn_get_best_stories")   return ToolHnGetBestStories(*hn_session_, args);
-        if (tool_name == "hn_get_item")           return ToolHnGetItem(*hn_session_, args);
-        if (tool_name == "hn_search_by_keyword")  return ToolHnSearchByKeyword(*hn_session_, args);
+        if (tool_name == "hn_get_top_stories")       return ToolHnGetTopStories(*hn_session_, args);
+        if (tool_name == "hn_get_new_stories")       return ToolHnGetNewStories(*hn_session_, args);
+        if (tool_name == "hn_get_best_stories")      return ToolHnGetBestStories(*hn_session_, args);
+        if (tool_name == "hn_get_item")              return ToolHnGetItem(*hn_session_, args);
+        if (tool_name == "hn_search_by_keyword")     return ToolHnSearchByKeyword(*hn_session_, args);
+        if (tool_name == "hn_get_latest_index")      return ToolHnGetLatestIndex(*hn_session_, args);
+        if (tool_name == "hn_fetch_detailed_story")  return ToolHnFetchDetailedStory(*hn_session_, args);
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: hn tool exception: ") + e.what());
     }
@@ -643,6 +738,128 @@ json McpServer::handle_tools_list() {
                     {"required", json::array({"q"})}
                 })}
             },
+            // ========== GitHub 分层渐进挖掘工具(新增,与 HN/arXiv 对称) ==========
+            {
+                {"name", "github_search_index"},
+                {"description", "Layer 1 - Lightweight GitHub repo search index: returns structured list "
+                                "(repo_id, full_name, description, language, stars, topics, html_url). "
+                                "No deep parsing, no contributor fetch. Use this first, then call "
+                                "github_fetch_repo_detail with selected owner/repo for deep mining."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"},{"description","Search keyword (supports language:, stars:, topic: qualifiers)"}})},
+                        {"language", json::object({{"type","string"},{"default",""},{"description","Language filter (e.g. python, cpp)"}})},
+                        {"sort", json::object({{"type","string"},{"default","stars"},{"enum", json::array({"stars","forks","updated"})}})},
+                        {"max_results", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",50}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "github_fetch_repo_detail"},
+                {"description", "Layer 2 - Deep mine a single GitHub repo: returns tech_stack "
+                                "(runtime/framework/database/devops/testing parsed from requirements.txt/package.json/Cargo.toml/go.mod/pom.xml), "
+                                "tech_blocks (core module dirs: src/api/cli/models/utils), "
+                                "top_contributors (login + contributions), direct_dependencies list. "
+                                "Use after github_search_index to mine selected repos."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"fetch_tech_stack", json::object({{"type","boolean"},{"default",true}})},
+                        {"fetch_code_structure", json::object({{"type","boolean"},{"default",true}})},
+                        {"fetch_top_contributors", json::object({{"type","boolean"},{"default",true}})},
+                        {"fetch_dependencies", json::object({{"type","boolean"},{"default",true}})},
+                        {"max_contributors", json::object({{"type","integer"},{"default",15},{"minimum",1},{"maximum",30}})}
+                    })},
+                    {"required", json::array({"owner","repo"})}
+                })}
+            },
+            {
+                {"name", "github_fetch_relation_network"},
+                {"description", "Layer 3 - Two-hop relation network mining: "
+                                "similar_repos (via topic + language Jaccard similarity), "
+                                "developer_related_repos (BFS from top contributors, level 1 + optional level 2 hop). "
+                                "Use after github_fetch_repo_detail when ecosystem/relation analysis is needed. "
+                                "Note: developer_depth=2 may issue many API calls (capped at ~30 related repos)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"find_similar_repos", json::object({{"type","boolean"},{"default",true}})},
+                        {"similar_by_tech_stack", json::object({{"type","boolean"},{"default",true}})},
+                        {"similar_by_topic", json::object({{"type","boolean"},{"default",true}})},
+                        {"max_similar", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",20}})},
+                        {"explore_developer_links", json::object({{"type","boolean"},{"default",true}})},
+                        {"developer_depth", json::object({{"type","integer"},{"default",2},{"minimum",1},{"maximum",2}})}
+                    })},
+                    {"required", json::array({"owner","repo"})}
+                })}
+            },
+            // === 局部对象连续动态分析索引 (next2) ===
+            {
+                {"name", "github_ingest_commit_timeline"},
+                {"description", "Ingest a single commit's file-level changes into file_timeline + file_cooccurrence tables. "
+                                "Fetches commit detail (with files array), parses each file's additions/deletions, "
+                                "and batch-inserts into SQLite. Idempotent via UNIQUE(repo, file_path, commit_hash). "
+                                "Returns records_inserted count. Use before github_module_timeline_analysis to populate local index."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"commit_hash", json::object({{"type","string"},{"description","Single commit SHA"}})}
+                    })},
+                    {"required", json::array({"owner","repo","commit_hash"})}
+                })}
+            },
+            {
+                {"name", "github_ingest_recent_commits_timeline"},
+                {"description", "Batch-ingest recent commits (since_days) into file_timeline + file_cooccurrence. "
+                                "Paginates commits list (per_page=100, max 10 pages), then calls per-commit detail API. "
+                                "Already-ingested commits are skipped via UNIQUE constraint (still costs 1 API call per commit). "
+                                "Returns records_inserted total. Use to populate local index before module_timeline_analysis."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"since_days", json::object({{"type","integer"},{"default",365},{"minimum",1},{"maximum",365}})},
+                        {"branch", json::object({{"type","string"},{"default",""},{"description","Branch name (empty = default branch)"}})},
+                        {"max_commits", json::object({{"type","integer"},{"default",100},{"minimum",1},{"maximum",500}})}
+                    })},
+                    {"required", json::array({"owner","repo"})}
+                })}
+            },
+            {
+                {"name", "github_module_timeline_analysis"},
+                {"description", "Local object continuous dynamic analysis - unified 3-layer entry point. "
+                                "Layer 1 (lightweight index): returns candidate list only. "
+                                "Layer 2 (deep dig): returns full timeline + contributor_rank + related_files + change_density. "
+                                "Layer 3 (two-hop): layer 2 + developer_modules (other modules each top contributor touches) + coupled_clusters. "
+                                "target_type: file/module/signature. time_range: 1y/180d/90d/30d. "
+                                "If ingest_first=true, auto-fetches recent commits + auto-clusters modules + triggers pre-aggregation before query."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"target_type", json::object({{"type","string"},
+                            {"enum", json::array({"file","module","signature"})},
+                            {"description","Analysis target granularity"}})},
+                        {"target_path", json::object({{"type","string"},{"default",""},{"description","Required when target_type=file"}})},
+                        {"module_name", json::object({{"type","string"},{"default",""},{"description","Required when target_type=module"}})},
+                        {"signature_regex", json::object({{"type","string"},{"default",""},{"description","Required when target_type=signature (substring match on file_path/commit_message)"}})},
+                        {"time_range", json::object({{"type","string"},{"default","1y"},{"enum", json::array({"1y","180d","90d","30d"})}})},
+                        {"layer", json::object({{"type","integer"},{"default",2},{"minimum",1},{"maximum",3}})},
+                        {"ingest_first", json::object({{"type","boolean"},{"default",true},{"description","If true, auto-ingest recent commits + auto-cluster modules + pre-aggregate before query"}})}
+                    })},
+                    {"required", json::array({"owner","repo","target_type"})}
+                })}
+            },
             // ========== arXiv 工具集(4 个 arxiv_*) ==========
             {
                 {"name", "arxiv_search_papers"},
@@ -702,6 +919,43 @@ json McpServer::handle_tools_list() {
                     {"required", json::array()}
                 })}
             },
+            // === 分层渐进挖掘工具(新增,与 HN 对称) ===
+            {
+                {"name", "arxiv_search_index"},
+                {"description", "Lightweight arXiv search index: returns structured list "
+                                "(arxiv_id, title, authors, primary_category, abstract_short, pdf_url, submitted_date). "
+                                "No PDF download, no full-text fetch. Use this first, then call "
+                                "arxiv_fetch_paper_detail with selected arxiv_id for deep mining."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"},{"description","Search keyword"}})},
+                        {"max_results", json::object({{"type","integer"},{"default",20},{"minimum",1},{"maximum",50}})},
+                        {"searchtype", json::object({{"type","string"},{"default","all"},
+                                                    {"enum", json::array({"all","title","abstract","author"})}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "arxiv_fetch_paper_detail"},
+                {"description", "Deep-fetch a single arXiv paper by arxiv_id: returns title, authors, primary_category, "
+                                "abstract_full, submitted_date, pdf_url, full_text (from ar5iv.org HTML rendering, "
+                                "no PDF parsing required), references list. "
+                                "Use after arxiv_search_index to mine selected papers on demand. "
+                                "full_text_status: ok|skipped|fetch_failed|no_text. "
+                                "references_status: ok|skipped|no_refs_section|no_refs_found."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"arxiv_id", json::object({{"type","string"},{"description","arXiv paper id (e.g. 2401.12345)"}})},
+                        {"fetch_full_text", json::object({{"type","boolean"},{"default",true}})},
+                        {"fetch_references", json::object({{"type","boolean"},{"default",true}})},
+                        {"text_limit_chars", json::object({{"type","integer"},{"default",20000},{"minimum",1000},{"maximum",50000}})}
+                    })},
+                    {"required", json::array({"arxiv_id"})}
+                })}
+            },
             // ========== Hacker News 工具集(5 个 hn_*) ==========
             {
                 {"name", "hn_get_top_stories"},
@@ -754,6 +1008,42 @@ json McpServer::handle_tools_list() {
                         {"count", json::object({{"type","integer"},{"default",10},{"minimum",1},{"maximum",50}})}
                     })},
                     {"required", json::array({"query"})}
+                })}
+            },
+            // === 分层渐进挖掘工具(新增) ===
+            {
+                {"name", "hn_get_latest_index"},
+                {"description", "Lightweight HN index: fetch front/newest/best page and return structured list "
+                                "(hn_id, rank, title, external_url, score, created_min_ago, has_discussion). "
+                                "No deep fetches, no external page loads. Use this first, then call "
+                                "hn_fetch_detailed_story with selected hn_id for deep mining."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"limit", json::object({{"type","integer"},{"default",30},{"minimum",1},{"maximum",100}})},
+                        {"source", json::object({{"type","string"},{"default","front"},
+                                                {"enum", json::array({"front","newest","best"})}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "hn_fetch_detailed_story"},
+                {"description", "Deep-fetch a single HN story by hn_id: returns title, source_url, "
+                                "article_plaintext (from external_url via kJsExtractRawPage) and "
+                                "discussion_comments tree (author, text, reply_level). "
+                                "Use after hn_get_latest_index to mine selected stories on demand. "
+                                "article_fetch_status: ok|skipped|disabled|no_external_url|fetch_failed|no_text."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"hn_id", json::object({{"type","string"},{"description","Numeric HN story id"}})},
+                        {"fetch_external_article", json::object({{"type","boolean"},{"default",true}})},
+                        {"fetch_comments", json::object({{"type","boolean"},{"default",true}})},
+                        {"comment_max_depth", json::object({{"type","integer"},{"default",2},{"minimum",1},{"maximum",5}})},
+                        {"max_comment_count", json::object({{"type","integer"},{"default",80},{"minimum",1},{"maximum",200}})},
+                        {"text_max_chars", json::object({{"type","integer"},{"default",20000},{"minimum",1000},{"maximum",50000}})}
+                    })},
+                    {"required", json::array({"hn_id"})}
                 })}
             },
             // ========== Package Registry 工具集(4 个 pkg_*) ==========

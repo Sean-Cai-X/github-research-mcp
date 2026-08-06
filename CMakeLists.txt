@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(research-mcp VERSION 0.1.0 LANGUAGES CXX)
+project(research-mcp VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,12 +35,20 @@ if(NOT webview2_FOUND)
     endif()
 endif()
 
+# === SQLite3: amalgamation 直接编译入 exe (无外部依赖) ===
+set(SQLITE_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/sqlite)
+if(NOT EXISTS ${SQLITE_INCLUDE_DIR}/sqlite3.h)
+    message(FATAL_ERROR "SQLite3 not found at third_party/sqlite/sqlite3.h")
+endif()
+
 add_executable(research-mcp
     src/main.cpp
     src/mcp_server.cpp
     src/http_server.cpp
     src/tools.cpp
     src/github_client.cpp
+    src/cache_manager.cpp
+    src/source_fusion.cpp
     src/webview_client.cpp
     src/webview_session.cpp
     src/webview_helpers.cpp
@@ -53,12 +61,14 @@ add_executable(research-mcp
     src/stackoverflow_tools.cpp
     src/formatters.cpp
     src/string_utils.cpp
+    third_party/sqlite/sqlite3.c
 )
 
 target_include_directories(research-mcp PRIVATE
     include
     ${JSON_INCLUDE_DIR}
     ${WEBVIEW2_INCLUDE_DIR}
+    ${SQLITE_INCLUDE_DIR}
 )
 
 if(TARGET nlohmann_json::nlohmann_json)

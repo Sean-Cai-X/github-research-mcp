@@ -32,8 +32,12 @@ third_party/downloads/
 # Runtime data
 webview2-data/
 profiles/
+data/
 *.log
 .env
+*.db
+*.db-wal
+*.db-shm
 
 # OS files
 Thumbs.db
