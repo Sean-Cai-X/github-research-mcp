@@ -264,6 +264,7 @@ private:
     std::string proxy_url_;
     std::map<std::string, std::string> headers_;
     std::string base_url_ = "https://api.github.com";
+    std::string last_ingest_error_;  // ingest 链路最后一次错误(空=无错误)
 };
 
 } // namespace github_research

@@ -360,7 +360,7 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
                                                       target_path, module_name,
                                                       signature_regex, time_range,
                                                       layer, ingest_first);
-            return make_success_result(r.dump());
+            return make_success_result(r.dump(-1, ' ', false, json::error_handler_t::replace));
 
         } else {
             return make_error_result("unknown tool: " + tool_name);

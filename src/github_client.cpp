@@ -1093,7 +1093,8 @@ int GitHubClient::ingest_commit_file_timeline(const std::string& owner,
     try {
         commit_detail = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
                                  "/commits/" + url_encode(commit_hash));
-    } catch (...) {
+    } catch (const std::exception& e) {
+        last_ingest_error_ = std::string("commit_detail: ") + e.what();
         return 0;
     }
     if (!commit_detail.is_object()) return 0;
@@ -1187,7 +1188,8 @@ int GitHubClient::ingest_recent_commits_timeline(const std::string& owner,
 
             commits = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
                                "/commits", params);
-        } catch (...) {
+        } catch (const std::exception& e) {
+            last_ingest_error_ = std::string("commits_list: ") + e.what();
             break;
         }
 
@@ -1265,10 +1267,14 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
     int64_t since_ts = (int64_t)std::time(nullptr) - (int64_t)window_days * 86400;
 
     // 增量抓取(可选):先填充 file_timeline,再做分析
+    result["ingest_attempted"] = ingest_first;
     if (ingest_first) {
+        last_ingest_error_.clear();
+        int ingested = 0;
         try {
             // 限制单次最多 50 commits,避免长时间阻塞
-            ingest_recent_commits_timeline(owner, repo, window_days, "", 50);
+            ingested = ingest_recent_commits_timeline(owner, repo, window_days, "", 50);
+            result["ingest_records"] = ingested;
 
             // 若模块表为空,自动聚类(从 tree API 拉取文件列表)
             auto existing_modules = cm.list_modules(repo_full);
@@ -1285,14 +1291,26 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
                         }
                     }
                     if (!all_files.empty()) cm.auto_cluster_modules(repo_full, all_files);
-                } catch (...) {
-                    // tree 拉取失败,继续用已有 file_timeline 数据
+                } catch (const std::exception& e) {
+                    if (last_ingest_error_.empty())
+                        last_ingest_error_ = std::string("tree: ") + e.what();
                 }
             }
             // 触发预聚合(生成 module_contributor_agg)
             cm.aggregate_module_contributors(repo_full, window_days);
-        } catch (...) {
-            // 抓取失败,继续用本地已有数据
+        } catch (const std::exception& e) {
+            if (last_ingest_error_.empty())
+                last_ingest_error_ = e.what();
+        }
+
+        // 报告 ingest 状态
+        if (last_ingest_error_.empty() && ingested > 0) {
+            result["ingest_status"] = "ok";
+        } else if (last_ingest_error_.empty() && ingested == 0) {
+            result["ingest_status"] = "no_new_commits";
+        } else {
+            result["ingest_status"] = "failed";
+            result["ingest_error"] = last_ingest_error_;
         }
     }
 
@@ -1339,6 +1357,20 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
 
         result["candidates"]       = candidates;
         result["candidate_count"]  = candidates.size();
+
+        // candidates 为空时补充诊断提示
+        if (candidates.empty() && ingest_first) {
+            if (result.value("ingest_status", "") == "failed") {
+                result["warning"] = "candidates empty: ingest failed - " +
+                                    result.value("ingest_error", "unknown");
+            } else if (result.value("ingest_status", "") == "no_new_commits") {
+                result["warning"] = "candidates empty: no commits found in the last " +
+                                    std::to_string(window_days) + " days";
+            } else {
+                result["warning"] = "candidates empty: target may not match any "
+                                    "ingested file (check exact path/type)";
+            }
+        }
         return result;
     }
 
@@ -1429,6 +1461,20 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
     result["contributor_rank"] = contributor_rank;
     result["related_files"]    = related_files;
     result["change_density"]   = change_density;
+
+    // timeline 为空时补充诊断提示
+    if (timeline.empty() && ingest_first) {
+        if (result.value("ingest_status", "") == "failed") {
+            result["warning"] = "timeline empty: ingest failed - " +
+                                result.value("ingest_error", "unknown");
+        } else if (result.value("ingest_status", "") == "no_new_commits") {
+            result["warning"] = "timeline empty: no commits found in the last " +
+                                std::to_string(window_days) + " days";
+        } else {
+            result["warning"] = "timeline empty: target_path may not match any "
+                                "ingested file (check exact path)";
+        }
+    }
 
     // === Layer 3: 二级递进(向外扩散) ===
     if (layer >= 3) {
