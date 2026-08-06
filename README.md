@@ -1008,7 +1008,37 @@ llama-server.exe ^
 | GET `/tools` | ✅ | 返回 65 个工具(完整列表) |
 | POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 65 个工具,JSON-RPC id=1 正确匹配 |
 | 缓存层 188 项烟雾测试 | ✅ pass=188 fail=0 | EXIT_CODE=0 |
-| 完整 8 源 fetch 回调 | ⏸ | 需用户提供 WebView2 profile 存放路径 + 可选代理 URL |
+| 完整 8 源 fetch 回调 | ✅ | 8 源 WebView2 session 全部 ready,proxy=http://127.0.0.1:7897 |
+| `github_module_timeline_analysis` ingest_first=false | ✅ | timeline_count=3 (research-mcp 仓库 src/tools.cpp) |
+| `github_module_timeline_analysis` ingest_first=true + branch | ✅ | timeline_count=35 (cxvision 仓库 codex/cxcore-integration 分支, FastMatch 签名匹配) |
+
+### branch 参数验证(非默认分支)
+
+以 `Sean-Cai-X/cxvision` 的 `codex/cxcore-integration` 分支为例,分析 FastMatch 相关文件更新时间线:
+
+```json
+{
+  "name": "github_module_timeline_analysis",
+  "arguments": {
+    "owner": "Sean-Cai-X",
+    "repo": "cxvision",
+    "target_type": "signature",
+    "signature_regex": "FastMatch",
+    "branch": "codex/cxcore-integration",
+    "ingest_first": true,
+    "time_range": "1y"
+  }
+}
+```
+
+返回 35 条 timeline 记录,关键文件包括:
+- `cximage/FastMatch.h` / `FastMatch.cpp` — 核心算法
+- `cximage/FastMatchGridClassAdapter.h/.cpp` — 网格模式适配器
+- `cximage/CxFastMatchRuntimeCapture.h/.cpp` — 运行时捕获
+- `cxparser/cxscript/module/cximage/frozen/fastmatch/` — 冻结脚本
+- `cxparser/cxscript/module/cximage/diagnostic/fastmatch/` — 诊断脚本
+
+> 注意: 未配置 `GITHUB_TOKEN` 时,GitHub API 速率限制为 60 次/小时。commits 列表可成功获取,但逐条抓取 commit 详情可能触发 HTTP 403。此时 `ingest_status=failed`,`ingest_error` 会报告具体错误,timeline 仍返回已获取的列表数据。配置 `GITHUB_TOKEN` 可解除此限制。
 
 ### 执行命令
 
