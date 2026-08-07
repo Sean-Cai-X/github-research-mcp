@@ -342,11 +342,13 @@ json GitHubClient::get_contributors(const std::string& owner, const std::string&
 
 json GitHubClient::get_recent_commits(const std::string& owner, const std::string& repo,
                                       int limit, const std::optional<std::string>& since,
-                                      const std::optional<std::string>& sha) {
+                                      const std::optional<std::string>& sha,
+                                      const std::optional<std::string>& path) {
     std::map<std::string, std::string> params;
     params["per_page"] = std::to_string(std::min(limit, 100));
     if (since) params["since"] = *since;
     if (sha && !sha->empty()) params["sha"] = *sha;  // 分支名 / tag / commit SHA
+    if (path && !path->empty()) params["path"] = *path;  // 目录/文件路径过滤,避免大仓库全量拉取超时
     return http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) + "/commits", params);
 }
 
@@ -1253,7 +1255,9 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
         return result;
     }
     if (target_type == "module" && module_name.empty()) {
-        result["error"] = "module_name required for target_type=module";
+        result["error"] = "module_name required for target_type=module "
+                          "(note: parameter name is 'module_name', not 'target_module'; "
+                          "if you passed target_module, retry with module_name instead)";
         return result;
     }
     if (target_type == "signature" && signature_regex.empty()) {

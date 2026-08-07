@@ -158,7 +158,12 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
             } else if (args.contains("branch") && args["branch"].is_string() && !args["branch"].get_ref<const std::string&>().empty()) {
                 sha = args["branch"].get<std::string>();
             }
-            json r = client.get_recent_commits(owner, repo, limit, since, sha);
+            // path: 按文件/目录路径过滤 commits,大仓库(linux/chromium)必传以避免全量拉取超时
+            std::optional<std::string> path;
+            if (args.contains("path") && args["path"].is_string() && !args["path"].get_ref<const std::string&>().empty()) {
+                path = args["path"].get<std::string>();
+            }
+            json r = client.get_recent_commits(owner, repo, limit, since, sha, path);
             return make_success_result(r.dump());
 
         } else if (tool_name == "github_get_branches") {
@@ -341,6 +346,10 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
             if (!err.empty()) return make_error_result(err);
             std::string module_name = get_string_arg(args, "module_name", tool_name, false, err);
             if (!err.empty()) return make_error_result(err);
+            // 别名兼容:模型常误传 target_module(与 target_type/target_path 配对直觉),接受为 module_name
+            if (module_name.empty() && args.contains("target_module") && args["target_module"].is_string()) {
+                module_name = args["target_module"].get<std::string>();
+            }
             std::string signature_regex = get_string_arg(args, "signature_regex", tool_name, false, err);
             if (!err.empty()) return make_error_result(err);
             std::string time_range = get_string_arg(args, "time_range", tool_name, false, err);

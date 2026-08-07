@@ -777,7 +777,7 @@ json McpServer::handle_tools_list() {
             },
             {
                 {"name", "github_get_commits"},
-                {"description", "Get recent commits of a GitHub repository. Use for timeline reconstruction and activity analysis. Use branch/sha to query non-default branches."},
+                {"description", "Get recent commits of a GitHub repository. Use for timeline reconstruction and activity analysis. Use branch/sha to query non-default branches. For large repos (linux/chromium), MUST pass 'path' to filter by directory/file to avoid timeout."},
                 {"inputSchema", {
                     {"type", "object"},
                     {"properties", {
@@ -786,7 +786,8 @@ json McpServer::handle_tools_list() {
                         {"limit", {{"type", "integer"}, {"default", 50}, {"minimum", 1}, {"maximum", 100}}},
                         {"since", {{"type", "string"}, {"format", "date-time"}, {"description", "ISO 8601 datetime, only commits after this"}}},
                         {"branch", {{"type", "string"}, {"description", "Branch name to query (e.g. codex/cxcore-integration)"}}},
-                        {"sha", {{"type", "string"}, {"description", "Override: branch name, tag name, or commit SHA (takes priority over branch)"}}}
+                        {"sha", {{"type", "string"}, {"description", "Override: branch name, tag name, or commit SHA (takes priority over branch)"}}},
+                        {"path", {{"type", "string"}, {"description", "Filter commits by file/directory path (e.g. drivers/net/ethernet). CRITICAL for large repos to avoid full-scan timeout."}}}
                     }},
                     {"required", json::array({"owner", "repo"})}
                 }}
@@ -1043,7 +1044,7 @@ json McpServer::handle_tools_list() {
                             {"enum", json::array({"file","module","signature"})},
                             {"description","Analysis target granularity"}})},
                         {"target_path", json::object({{"type","string"},{"default",""},{"description","Required when target_type=file"}})},
-                        {"module_name", json::object({{"type","string"},{"default",""},{"description","Required when target_type=module"}})},
+                        {"module_name", json::object({{"type","string"},{"default",""},{"description","Required when target_type=module. NOTE: name is 'module_name', NOT 'target_module'."}})},
                         {"signature_regex", json::object({{"type","string"},{"default",""},{"description","Required when target_type=signature (substring match on file_path/commit_message)"}})},
                         {"time_range", json::object({{"type","string"},{"default","1y"},{"enum", json::array({"1y","180d","90d","30d"})}})},
                         {"layer", json::object({{"type","integer"},{"default",2},{"minimum",1},{"maximum",3}})},

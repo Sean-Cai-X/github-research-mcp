@@ -50,10 +50,12 @@ public:
 
     // 6. github_get_commits
     // sha: 分支名、tag 或 commit SHA(默认走 HEAD 分支)
+    // path: 按文件/目录路径过滤 commits(对大仓库至关重要,避免全量拉取超时)
     json get_recent_commits(const std::string& owner, const std::string& repo,
                             int limit = 50,
                             const std::optional<std::string>& since = std::nullopt,
-                            const std::optional<std::string>& sha = std::nullopt);
+                            const std::optional<std::string>& sha = std::nullopt,
+                            const std::optional<std::string>& path = std::nullopt);
 
     // 6b. github_get_branches(新增:枚举所有分支,用于按分支汇总提交)
     json get_branches(const std::string& owner, const std::string& repo, int limit = 100);
