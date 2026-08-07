@@ -5,6 +5,16 @@ out/
 bin/
 lib/
 
+# Binary images / screenshots / docs (use network source, not in repo)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.ico
+*.svg
+assets/screenshots/
+
 # Visual Studio
 .vs/
 *.user
@@ -26,6 +36,10 @@ third_party/WebView2/lib/
 third_party/json/
 # NuGet 包和解压中间产物(用户自行下载)
 third_party/downloads/
+# curl 官方预编译包(用户自行下载,见 BUILD_RELEASE.md)
+# 下载: https://curl.se/windows/ -> 解压到 third_party/curl/
+# 生成 .lib: lib /machine:x64 /def:bin\libcurl-x64.def /out:lib\libcurl.lib
+third_party/curl/
 *.nupkg
 *.zip
 

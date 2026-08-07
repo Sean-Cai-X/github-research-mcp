@@ -1615,31 +1615,49 @@ std::vector<json> CacheManager::query_file_timeline(const std::string& repo_full
                                                       const std::string& file_path,
                                                       int64_t since,
                                                       int64_t until,
-                                                      int limit) {
+                                                      int limit,
+                                                      bool prefix_match) {
     std::vector<json> out;
     if (!cfg_.enabled || !db_ || repo_full_name.empty() || file_path.empty()) return out;
     std::lock_guard<std::mutex> lk(mu_);
-    std::string sql = "SELECT commit_hash,author_login,commit_time,lines_add,lines_del,"
+    // prefix_match=true:用 LIKE 前缀匹配目录下所有子文件
+    // SQL: WHERE file_path LIKE 'drivers/net/%' (注意尾部 / 避免匹配 drivers/network)
+    // 注意:SELECT 包含 file_path 字段(前缀匹配时每条记录可能属于不同文件,需要知道具体文件名)
+    std::string sql = "SELECT file_path,commit_hash,author_login,commit_time,lines_add,lines_del,"
                       "pr_number,commit_message FROM file_timeline "
-                      "WHERE repo_full_name=? AND file_path=?";
+                      "WHERE repo_full_name=? AND ";
+    if (prefix_match) {
+        sql += "file_path LIKE ?";
+    } else {
+        sql += "file_path=?";
+    }
     if (since > 0)  sql += " AND commit_time>=" + std::to_string(since);
     if (until > 0)  sql += " AND commit_time<=" + std::to_string(until);
     sql += " ORDER BY commit_time ASC LIMIT " + std::to_string(limit) + ";";
     Stmt s;
     if (!prepare(db_, s, sql)) return out;
     sqlite3_bind_text(s.p, 1, repo_full_name.c_str(), (int)repo_full_name.size(), SQLITE_TRANSIENT);
-    sqlite3_bind_text(s.p, 2, file_path.c_str(), (int)file_path.size(), SQLITE_TRANSIENT);
+    if (prefix_match) {
+        // 前缀匹配:drivers/net -> drivers/net/%(加 / 避免误匹配 drivers/network)
+        std::string pattern = file_path;
+        if (pattern.back() != '/') pattern += "/";
+        pattern += "%";
+        sqlite3_bind_text(s.p, 2, pattern.c_str(), (int)pattern.size(), SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_text(s.p, 2, file_path.c_str(), (int)file_path.size(), SQLITE_TRANSIENT);
+    }
     while (sqlite3_step(s.p) == SQLITE_ROW) {
         json r;
-        r["commit_hash"]    = (const char*)sqlite3_column_text(s.p, 0);
-        r["author_login"]   = (const char*)sqlite3_column_text(s.p, 1);
-        r["commit_time"]    = sqlite3_column_int64(s.p, 2);
-        r["lines_add"]      = sqlite3_column_int(s.p, 3);
-        r["lines_del"]      = sqlite3_column_int(s.p, 4);
-        if (sqlite3_column_type(s.p, 5) != SQLITE_NULL)
-            r["pr_number"]  = sqlite3_column_int(s.p, 5);
+        r["file_path"]      = (const char*)sqlite3_column_text(s.p, 0);
+        r["commit_hash"]    = (const char*)sqlite3_column_text(s.p, 1);
+        r["author_login"]   = (const char*)sqlite3_column_text(s.p, 2);
+        r["commit_time"]    = sqlite3_column_int64(s.p, 3);
+        r["lines_add"]      = sqlite3_column_int(s.p, 4);
+        r["lines_del"]      = sqlite3_column_int(s.p, 5);
         if (sqlite3_column_type(s.p, 6) != SQLITE_NULL)
-            r["commit_message"] = (const char*)sqlite3_column_text(s.p, 6);
+            r["pr_number"]  = sqlite3_column_int(s.p, 6);
+        if (sqlite3_column_type(s.p, 7) != SQLITE_NULL)
+            r["commit_message"] = (const char*)sqlite3_column_text(s.p, 7);
         out.push_back(r);
     }
     return out;
@@ -2027,6 +2045,185 @@ std::vector<json> CacheManager::query_developer_modules(const std::string& repo_
         r["last_commit_time"]   = sqlite3_column_int64(s.p, 5);
         out.push_back(r);
     }
+    return out;
+}
+
+// ── 原语A:子模块拆分时序切片 ────────────────────────────────
+// 按一级子目录聚合变更密度曲线
+// SQL:从 file_timeline 中提取 root_path 下的一级子目录,按 subdir + month 分组统计
+std::vector<json> CacheManager::query_subdir_change_density(const std::string& repo_full_name,
+                                                             const std::string& root_path,
+                                                             int64_t since,
+                                                             int limit) {
+    std::vector<json> out;
+    if (!cfg_.enabled || !db_ || repo_full_name.empty() || root_path.empty()) return out;
+    std::lock_guard<std::mutex> lk(mu_);
+
+    // 构建 LIKE 前缀:root_path + "/" + "%"
+    std::string prefix = root_path;
+    if (prefix.back() != '/') prefix += "/";
+    prefix += "%";
+    // root_path 的长度(含尾部 /),用于 substr 提取一级子目录名
+    int root_len = (int)(root_path.back() == '/' ? root_path.length() : root_path.length() + 1);
+
+    // 提取一级子目录名:
+    //   file_path = "drivers/usb/typec/ucsi/ucsi.c"
+    //   root_path = "drivers/usb"
+    //   substr(file_path, root_len+1) = "typec/ucsi/ucsi.c"
+    //   一级子目录 = substr 到第一个 / 或结尾 = "typec"
+    // SQLite instr() 返回第一个匹配位置(1-based),找不到返回 0
+    std::string sql =
+        "SELECT "
+        "  CASE "
+        "    WHEN instr(substr(file_path, ?2), '/') > 0 "
+        "    THEN substr(file_path, ?2, instr(substr(file_path, ?2), '/') - 1) "
+        "    ELSE substr(file_path, ?2) "
+        "  END AS subdir, "
+        "  strftime('%Y-%m', commit_time, 'unixepoch') AS month, "
+        "  COUNT(*) AS changes, "
+        "  COUNT(DISTINCT author_login) AS authors, "
+        "  SUM(lines_add) AS lines_add, "
+        "  SUM(lines_del) AS lines_del "
+        "FROM file_timeline "
+        "WHERE repo_full_name=?1 AND file_path LIKE ?3 ";
+    if (since > 0) sql += " AND commit_time>=" + std::to_string(since);
+    sql += " GROUP BY subdir, month ORDER BY subdir ASC, month ASC LIMIT ?4;";
+
+    Stmt s;
+    if (!prepare(db_, s, sql)) return out;
+    sqlite3_bind_text(s.p, 1, repo_full_name.c_str(), (int)repo_full_name.size(), SQLITE_TRANSIENT);
+    sqlite3_bind_int (s.p, 2, root_len + 1);  // substr 起始位置(1-based)
+    sqlite3_bind_text(s.p, 3, prefix.c_str(), (int)prefix.size(), SQLITE_TRANSIENT);
+    sqlite3_bind_int (s.p, 4, limit * 50);    // 每个 subdir 多个月份,放宽限制
+
+    // 按 subdir 分组组装
+    std::map<std::string, json> subdir_map;
+    while (sqlite3_step(s.p) == SQLITE_ROW) {
+        std::string subdir = (const char*)sqlite3_column_text(s.p, 0);
+        if (subdir.empty()) continue;
+        json month_entry;
+        month_entry["month"]      = (const char*)sqlite3_column_text(s.p, 1);
+        month_entry["changes"]    = sqlite3_column_int(s.p, 2);
+        month_entry["authors"]    = sqlite3_column_int(s.p, 3);
+        month_entry["lines_add"]  = sqlite3_column_int(s.p, 4);
+        month_entry["lines_del"]  = sqlite3_column_int(s.p, 5);
+
+        auto it = subdir_map.find(subdir);
+        if (it == subdir_map.end()) {
+            json sd;
+            sd["subdir"]         = subdir;
+            sd["full_path"]      = root_path + "/" + subdir;
+            sd["monthly_density"] = json::array({month_entry});
+            sd["total_changes"]  = month_entry["changes"].get<int>();
+            subdir_map[subdir]   = sd;
+        } else {
+            it->second["monthly_density"].push_back(month_entry);
+            it->second["total_changes"] = it->second["total_changes"].get<int>() +
+                                          month_entry["changes"].get<int>();
+        }
+    }
+
+    // 按总变更数降序排列
+    for (auto& kv : subdir_map) out.push_back(kv.second);
+    std::sort(out.begin(), out.end(), [](const json& a, const json& b) {
+        return a.value("total_changes", 0) > b.value("total_changes", 0);
+    });
+
+    return out;
+}
+
+// ── 原语B:维护链路归因 ─────────────────────────────────────
+// 区分开发提交 vs 合并提交,按作者聚合统计
+std::vector<json> CacheManager::query_maintenance_attribution(const std::string& repo_full_name,
+                                                               const std::string& path_prefix,
+                                                               int64_t since,
+                                                               int limit) {
+    std::vector<json> out;
+    if (!cfg_.enabled || !db_ || repo_full_name.empty() || path_prefix.empty()) return out;
+    std::lock_guard<std::mutex> lk(mu_);
+
+    // 构建 LIKE 前缀
+    std::string prefix = path_prefix;
+    if (prefix.back() != '/') prefix += "/";
+    prefix += "%";
+
+    // 按作者 + commit_type(merge/dev) 聚合
+    // merge commit 识别:commit_message 以 "Merge" 开头
+    std::string sql =
+        "SELECT author_login, "
+        "  CASE WHEN commit_message LIKE 'Merge%' THEN 'merge' ELSE 'dev' END AS commit_type, "
+        "  COUNT(*) AS commit_count, "
+        "  MIN(commit_time) AS first_time, "
+        "  MAX(commit_time) AS last_time, "
+        "  SUM(lines_add) AS total_lines_add, "
+        "  SUM(lines_del) AS total_lines_del "
+        "FROM file_timeline "
+        "WHERE repo_full_name=?1 AND file_path LIKE ?2 ";
+    if (since > 0) sql += " AND commit_time>=" + std::to_string(since);
+    sql += " GROUP BY author_login, commit_type "
+           "ORDER BY commit_count DESC LIMIT ?3;";
+
+    Stmt s;
+    if (!prepare(db_, s, sql)) return out;
+    sqlite3_bind_text(s.p, 1, repo_full_name.c_str(), (int)repo_full_name.size(), SQLITE_TRANSIENT);
+    sqlite3_bind_text(s.p, 2, prefix.c_str(), (int)prefix.size(), SQLITE_TRANSIENT);
+    sqlite3_bind_int (s.p, 3, limit);
+
+    // 按作者分组,每个作者下有 merge/dev 两种类型
+    std::map<std::string, json> author_map;
+    while (sqlite3_step(s.p) == SQLITE_ROW) {
+        std::string author = (const char*)sqlite3_column_text(s.p, 0);
+        if (author.empty()) continue;
+        std::string ctype  = (const char*)sqlite3_column_text(s.p, 1);
+        int cnt            = sqlite3_column_int(s.p, 2);
+        int64_t first_t    = sqlite3_column_int64(s.p, 3);
+        int64_t last_t     = sqlite3_column_int64(s.p, 4);
+        int lines_add      = sqlite3_column_int(s.p, 5);
+        int lines_del      = sqlite3_column_int(s.p, 6);
+
+        auto it = author_map.find(author);
+        if (it == author_map.end()) {
+            json a;
+            a["author_login"]  = author;
+            a["dev_commits"]   = 0;
+            a["merge_commits"] = 0;
+            a["total_commits"] = 0;
+            a["total_lines_add"] = 0;
+            a["total_lines_del"] = 0;
+            a["first_commit_time"] = first_t;
+            a["last_commit_time"]  = last_t;
+            author_map[author] = a;
+            it = author_map.find(author);
+        }
+        if (ctype == "merge") {
+            it->second["merge_commits"] = it->second["merge_commits"].get<int>() + cnt;
+        } else {
+            it->second["dev_commits"] = it->second["dev_commits"].get<int>() + cnt;
+        }
+        it->second["total_commits"] = it->second["total_commits"].get<int>() + cnt;
+        it->second["total_lines_add"] = it->second["total_lines_add"].get<int>() + lines_add;
+        it->second["total_lines_del"] = it->second["total_lines_del"].get<int>() + lines_del;
+        if (first_t < it->second["first_commit_time"].get<int64_t>())
+            it->second["first_commit_time"] = first_t;
+        if (last_t > it->second["last_commit_time"].get<int64_t>())
+            it->second["last_commit_time"] = last_t;
+    }
+
+    // 计算每个作者的 merge 占比并输出
+    for (auto& kv : author_map) {
+        json& a = kv.second;
+        int total = a["total_commits"].get<int>();
+        int merge = a["merge_commits"].get<int>();
+        a["merge_ratio"] = total > 0 ? (double)merge / total : 0.0;
+        // 维护者角色判定:merge_commits > 0 标记为 maintainer
+        a["role"] = merge > 0 ? "maintainer" : "developer";
+        out.push_back(a);
+    }
+    // 按总提交数降序
+    std::sort(out.begin(), out.end(), [](const json& a, const json& b) {
+        return a.value("total_commits", 0) > b.value("total_commits", 0);
+    });
+
     return out;
 }
 

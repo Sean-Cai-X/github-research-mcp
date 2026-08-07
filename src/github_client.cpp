@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <thread>
+#include <chrono>
 
 namespace github_research {
 
@@ -86,9 +88,13 @@ static int cache_ttl_for_endpoint(const std::string& endpoint) {
 
 // === 构造 ===
 
-GitHubClient::GitHubClient(std::optional<std::string> token, int timeout_seconds)
-    : http_client_("Deep-Research-Bot/1.0", timeout_seconds, true),
-      timeout_seconds_(timeout_seconds) {
+GitHubClient::GitHubClient(std::optional<std::string> token, int timeout_seconds, Backend backend)
+    : timeout_seconds_(timeout_seconds), backend_(backend) {
+    if (backend_ == Backend::Curl) {
+        http_client_ = std::make_unique<CurlHttpClient>("Deep-Research-Bot/1.0", timeout_seconds);
+    } else {
+        http_client_ = std::make_unique<WebViewClient>("Deep-Research-Bot/1.0", timeout_seconds, true);
+    }
     headers_["Accept"] = "application/vnd.github.v3+json";
     headers_["User-Agent"] = "Deep-Research-Bot/1.0";
     if (token && !token->empty()) {
@@ -134,9 +140,9 @@ json GitHubClient::http_get(const std::string& endpoint,
         hdrs["Accept"] = *accept;
     }
 
-    // 首次请求时延迟初始化 WebView2 后端(单一技术栈,无 fallback)
+    // 首次请求时延迟初始化后端(无 fallback)
     if (!ensure_ready()) {
-        GitHubAPIError err("WebView2 backend initialization failed (no fallback, single tech stack)", 0, url, "");
+        GitHubAPIError err("backend initialization failed (no fallback)", 0, url, "");
         if (cm.is_ready()) cm.put("github", cache_key, "", "json", 1, "", "failed", err.what());
         throw err;
     }
@@ -145,8 +151,8 @@ json GitHubClient::http_get(const std::string& endpoint,
     std::string body;
     std::map<std::string, std::string> resp_headers;
 
-    // WebView2 后端(唯一网络层)
-    HttpResponse resp = http_client_.get(url, hdrs);
+    // 后端网络层(libcurl 或 WebView2)
+    HttpResponse resp = http_client_->get(url, hdrs);
     status_code = resp.status_code;
     body = resp.body;
     resp_headers = resp.headers;
@@ -219,9 +225,9 @@ std::string GitHubClient::http_get_text(const std::string& endpoint,
         hdrs["Accept"] = *accept;
     }
 
-    // 首次请求时延迟初始化 WebView2 后端
+    // 首次请求时延迟初始化后端
     if (!ensure_ready()) {
-        GitHubAPIError err("WebView2 backend initialization failed", 0, url, "");
+        GitHubAPIError err("backend initialization failed", 0, url, "");
         if (cm.is_ready()) cm.put("github", cache_key, "", "text", 1, "", "failed", err.what());
         throw err;
     }
@@ -230,8 +236,8 @@ std::string GitHubClient::http_get_text(const std::string& endpoint,
     std::string body;
     std::map<std::string, std::string> resp_headers;
 
-    // WebView2 后端(唯一网络层)
-    HttpResponse resp = http_client_.get(url, hdrs);
+    // 后端网络层(libcurl 或 WebView2)
+    HttpResponse resp = http_client_->get(url, hdrs);
     status_code = resp.status_code;
     body = resp.body;
     resp_headers = resp.headers;
@@ -1091,13 +1097,36 @@ int GitHubClient::ingest_commit_file_timeline(const std::string& owner,
 
     // GET /repos/{owner}/{repo}/commits/{commit_hash}
     // 返回 commit 详情(含 files 数组,每个元素含 filename/additions/deletions)
+    // 403 二级限流(abuse detection)时指数退避重试,避免大量 commit 详情密集调用失败
     json commit_detail;
-    try {
-        commit_detail = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
-                                 "/commits/" + url_encode(commit_hash));
-    } catch (const std::exception& e) {
-        last_ingest_error_ = std::string("commit_detail: ") + e.what();
-        return 0;
+    const int MAX_RETRIES = 3;
+    const int backoff_secs[MAX_RETRIES] = {10, 30, 60};
+    bool rate_limited = false;
+    for (int attempt = 0; attempt <= MAX_RETRIES; ++attempt) {
+        try {
+            commit_detail = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
+                                     "/commits/" + url_encode(commit_hash));
+            rate_limited = false;
+            break;
+        } catch (const GitHubAPIError& e) {
+            if (e.status_code() == 403 || e.status_code() == 429) {
+                if (attempt < MAX_RETRIES) {
+                    rate_limited = true;
+                    std::cerr << "[ingest] commit_detail 403/429 for " << commit_hash.substr(0, 8)
+                              << ", backing off " << backoff_secs[attempt] << "s (attempt "
+                              << (attempt + 1) << "/" << MAX_RETRIES << ")" << std::endl;
+                    std::this_thread::sleep_for(std::chrono::seconds(backoff_secs[attempt]));
+                    continue;
+                }
+                last_ingest_error_ = std::string("commit_detail: HTTP 403 (rate limited after retries)");
+                return -1;  // 信号:持续限流,调用方应中断整个 ingest
+            }
+            last_ingest_error_ = std::string("commit_detail: ") + e.what();
+            return 0;
+        } catch (const std::exception& e) {
+            last_ingest_error_ = std::string("commit_detail: ") + e.what();
+            return 0;
+        }
     }
     if (!commit_detail.is_object()) return 0;
 
@@ -1161,7 +1190,8 @@ int GitHubClient::ingest_recent_commits_timeline(const std::string& owner,
                                                   const std::string& repo,
                                                   int since_days,
                                                   const std::string& branch,
-                                                  int max_commits) {
+                                                  int max_commits,
+                                                  const std::string& path) {
     CacheManager& cm = CacheManager::instance();
     if (!cm.is_ready() || owner.empty() || repo.empty()) return 0;
     if (since_days <= 0 || max_commits <= 0) return 0;
@@ -1187,6 +1217,7 @@ int GitHubClient::ingest_recent_commits_timeline(const std::string& owner,
             params["per_page"] = std::to_string(limit);
             params["since"] = since_iso;
             if (!branch.empty()) params["sha"] = branch;
+            if (!path.empty()) params["path"] = path;  // 大仓库必传:仅拉取该路径相关 commits
 
             commits = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
                                "/commits", params);
@@ -1195,9 +1226,41 @@ int GitHubClient::ingest_recent_commits_timeline(const std::string& owner,
             break;
         }
 
+        // 大仓库(如 torvalds/linux)精确文件路径过滤可能返回空(GitHub API 限制)
+        // 回退到父目录路径重新查询,ingest_commit_file_timeline 会写入 commit 的所有
+        // files(含目标文件),后续 query_file_timeline 精确匹配即可命中
+        if (page == 1 && (!commits.is_array() || commits.empty()) && !path.empty() &&
+            path.find('/') != std::string::npos) {
+            std::string fallback_path = path;
+            for (int level = 0; level < 3 && fallback_path.find('/') != std::string::npos; ++level) {
+                size_t pos = fallback_path.find_last_of('/');
+                fallback_path = fallback_path.substr(0, pos);
+                if (fallback_path.empty()) break;
+                try {
+                    std::map<std::string, std::string> params;
+                    params["per_page"] = std::to_string(limit);
+                    params["since"] = since_iso;
+                    if (!branch.empty()) params["sha"] = branch;
+                    params["path"] = fallback_path;
+                    commits = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
+                                       "/commits", params);
+                    if (commits.is_array() && !commits.empty()) {
+                        std::cerr << "[ingest] path fallback: \"" << path << "\" -> \""
+                                  << fallback_path << "\" (" << commits.size()
+                                  << " commits, original path returned empty on large repo)"
+                                  << std::endl;
+                        break;
+                    }
+                } catch (const std::exception&) {
+                    break;  // 回退查询失败,不再继续
+                }
+            }
+        }
+
         if (!commits.is_array() || commits.empty()) break;
 
         int batch_count = 0;
+        int consecutive_failures = 0;
         for (auto& c : commits) {
             if (fetched >= max_commits) break;
             if (!c.is_object()) continue;
@@ -1205,9 +1268,29 @@ int GitHubClient::ingest_recent_commits_timeline(const std::string& owner,
             if (sha_hash.empty()) continue;
 
             int n = ingest_commit_file_timeline(owner, repo, sha_hash);
+            if (n < 0) {
+                // 持续限流(403 重试耗尽),中断整个 ingest 避免继续触发 abuse detection
+                std::cerr << "[ingest] persistent rate limit detected, aborting ingest at "
+                          << fetched << "/" << max_commits << " commits" << std::endl;
+                goto ingest_done;
+            }
+            if (n == 0 && !last_ingest_error_.empty()) {
+                ++consecutive_failures;
+                if (consecutive_failures >= 5) {
+                    std::cerr << "[ingest] 5 consecutive failures, aborting ingest" << std::endl;
+                    goto ingest_done;
+                }
+            } else {
+                consecutive_failures = 0;
+            }
             total_records += n;
             ++fetched;
             ++batch_count;
+
+            // 节流:每次 commit 详情后 sleep 800ms,避免密集调用触发二级限流
+            if (fetched < max_commits) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            }
         }
 
         // 不足一页,说明已到末尾
@@ -1215,6 +1298,7 @@ int GitHubClient::ingest_recent_commits_timeline(const std::string& owner,
         ++page;
     }
 
+ingest_done:
     return total_records;
 }
 
@@ -1279,27 +1363,40 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
         int ingested = 0;
         try {
             // 限制单次最多 50 commits,避免长时间阻塞
-            ingested = ingest_recent_commits_timeline(owner, repo, window_days, branch, 50);
+            // 传入路径过滤:大仓库(linux)只拉该路径相关 commits,避免全量拉取超时
+            // module 类型:module_name 看起来像路径(包含 /)时,用它作为 path 过滤
+            std::string ingest_path = target_path;
+            if (target_type == "module" && !module_name.empty() &&
+                module_name.find('/') != std::string::npos) {
+                ingest_path = module_name;
+            }
+            ingested = ingest_recent_commits_timeline(owner, repo, window_days, branch, 50, ingest_path);
             result["ingest_records"] = ingested;
 
-            // 若模块表为空,自动聚类(从 tree API 拉取文件列表)
-            auto existing_modules = cm.list_modules(repo_full);
-            if (existing_modules.empty()) {
-                try {
-                    json tree = get_tree_raw(owner, repo, branch.empty() ? "main" : branch, true);
-                    std::vector<std::string> all_files;
-                    if (tree.is_object() && tree.contains("tree") && tree["tree"].is_array()) {
-                        for (auto& entry : tree["tree"]) {
-                            if (entry.is_object() && entry.value("type", "") == "blob") {
-                                std::string p = entry.value("path", "");
-                                if (!p.empty()) all_files.push_back(p);
+            // 若模块表为空且 target_type=module,自动聚类(从 tree API 拉取文件列表)
+            // target_type=file/signature 不需要 modules 表,跳过 tree 拉取避免大仓库超时
+            // 注意:module_name 为路径时也跳过 tree(用前缀匹配替代,避免大仓库超时)
+            if (target_type == "module" &&
+                (module_name.empty() || module_name.find('/') == std::string::npos)) {
+                auto existing_modules = cm.list_modules(repo_full);
+                if (existing_modules.empty()) {
+                    try {
+                        json tree = get_tree_raw(owner, repo, branch.empty() ? "main" : branch, true);
+                        std::vector<std::string> all_files;
+                        if (tree.is_object() && tree.contains("tree") && tree["tree"].is_array()) {
+                            for (auto& entry : tree["tree"]) {
+                                if (entry.is_object() && entry.value("type", "") == "blob") {
+                                    std::string p = entry.value("path", "");
+                                    if (!p.empty()) all_files.push_back(p);
+                                }
                             }
                         }
+                        if (!all_files.empty()) cm.auto_cluster_modules(repo_full, all_files);
+                    } catch (const std::exception& e) {
+                        // tree 拉取失败(大仓库超时)不致命:module 分析降级,不影响 ingest 状态
+                        std::cerr << "[ingest] tree auto-cluster skipped: " << e.what() << std::endl;
+                        result["tree_warning"] = std::string("auto-cluster skipped: ") + e.what();
                     }
-                    if (!all_files.empty()) cm.auto_cluster_modules(repo_full, all_files);
-                } catch (const std::exception& e) {
-                    if (last_ingest_error_.empty())
-                        last_ingest_error_ = std::string("tree: ") + e.what();
                 }
             }
             // 触发预聚合(生成 module_contributor_agg)
@@ -1335,6 +1432,34 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
                     // 最后一次提交时间(tl 升序,取末尾)
                     c["last_commit_time"] = tl.back().value("commit_time", 0);
                     candidates.push_back(c);
+                } else {
+                    // 精确匹配为空时尝试目录前缀匹配(target_path 可能是目录)
+                    auto tl_prefix = cm.query_file_timeline(repo_full, target_path,
+                                                              since_ts, 0, 1000, true);
+                    if (!tl_prefix.empty()) {
+                        // 聚合前缀匹配到的所有文件
+                        std::map<std::string, std::pair<int, int64_t>> file_summary;
+                        for (auto& t : tl_prefix) {
+                            std::string fp = t.value("file_path", "");
+                            if (fp.empty()) continue;
+                            int64_t ct = t.value("commit_time", 0);
+                            auto it = file_summary.find(fp);
+                            if (it == file_summary.end()) {
+                                file_summary[fp] = {1, ct};
+                            } else {
+                                it->second.first++;
+                                if (ct > it->second.second) it->second.second = ct;
+                            }
+                        }
+                        for (auto& kv : file_summary) {
+                            json c;
+                            c["file_path"]        = kv.first;
+                            c["change_count"]     = kv.second.first;
+                            c["last_commit_time"] = kv.second.second;
+                            c["matched_by"]       = "prefix_match";
+                            candidates.push_back(c);
+                        }
+                    }
                 }
             } else if (!signature_regex.empty()) {
                 // 用 signature_regex 做 file_path 子串匹配过滤
@@ -1371,6 +1496,35 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
                     c["module_name"]      = module_name;
                     c["change_count"]     = tl.size();
                     c["last_commit_time"] = tl.back().value("commit_time", 0);
+                    candidates.push_back(c);
+                }
+            }
+            // module_def 表为空(大仓库 tree API 超时)且 module_name 像路径时,
+            // 用 module_name 作为 path 前缀匹配 file_timeline(与 file 类型回退逻辑一致)
+            if (candidates.empty() && !module_name.empty() &&
+                module_name.find('/') != std::string::npos) {
+                auto tl_prefix = cm.query_file_timeline(repo_full, module_name,
+                                                         since_ts, 0, 1000, true);
+                std::map<std::string, std::pair<int, int64_t>> file_summary;
+                for (auto& t : tl_prefix) {
+                    std::string fp = t.value("file_path", "");
+                    if (fp.empty()) continue;
+                    int64_t ct = t.value("commit_time", 0);
+                    auto it = file_summary.find(fp);
+                    if (it == file_summary.end()) {
+                        file_summary[fp] = {1, ct};
+                    } else {
+                        it->second.first++;
+                        if (ct > it->second.second) it->second.second = ct;
+                    }
+                }
+                for (auto& kv : file_summary) {
+                    json c;
+                    c["file_path"]        = kv.first;
+                    c["module_name"]      = module_name;
+                    c["change_count"]     = kv.second.first;
+                    c["last_commit_time"] = kv.second.second;
+                    c["matched_by"]       = "prefix_match";
                     candidates.push_back(c);
                 }
             }
@@ -1419,6 +1573,48 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
             timeline       = cm.query_file_timeline(repo_full, target_path, since_ts, 0, 500);
             change_density = cm.query_change_density(repo_full, target_path, since_ts, 24);
             related_files  = cm.query_related_files(repo_full, target_path, 2, 20);
+
+            // 精确匹配为空时自动尝试目录前缀匹配
+            // 场景1:target_path 是目录(如 "drivers/net"),file_timeline 表存的是具体文件
+            //       路径(如 "drivers/net/eth0.c"),精确匹配返回空,用前缀匹配聚合子文件
+            // 场景2:target_path 是深层文件(如 "drivers/net/ipv4/tcp_input.c"),GitHub API
+            //       大仓库 path 过滤深度有限制,ingest 回退到 drivers/net 拉取 commits,
+            //       但 50 个 commits 可能不含该文件,需用父目录前缀匹配找回相关数据
+            if (timeline.empty()) {
+                auto tl_prefix = cm.query_file_timeline(repo_full, target_path,
+                                                         since_ts, 0, 500, true);
+                std::string matched_prefix = target_path;
+
+                // 直接前缀匹配也为空时,逐步向上回退 target_path 做前缀匹配
+                if (tl_prefix.empty() && target_path.find('/') != std::string::npos) {
+                    std::string fallback = target_path;
+                    for (int level = 0; level < 3 && fallback.find('/') != std::string::npos; ++level) {
+                        size_t pos = fallback.find_last_of('/');
+                        fallback = fallback.substr(0, pos);
+                        if (fallback.empty()) break;
+                        auto tl_fb = cm.query_file_timeline(repo_full, fallback,
+                                                             since_ts, 0, 500, true);
+                        if (!tl_fb.empty()) {
+                            tl_prefix = tl_fb;
+                            matched_prefix = fallback;
+                            result["prefix_match_fallback_from"] = target_path;
+                            break;
+                        }
+                    }
+                }
+
+                if (!tl_prefix.empty()) {
+                    timeline = tl_prefix;
+                    result["prefix_match"] = true;
+                    result["matched_path_prefix"] = matched_prefix + "/";
+                    // 前缀匹配时 change_density/related_files 取第一个匹配文件作代表
+                    std::string first_file = tl_prefix[0].value("file_path", "");
+                    if (!first_file.empty()) {
+                        change_density = cm.query_change_density(repo_full, first_file, since_ts, 24);
+                        related_files  = cm.query_related_files(repo_full, first_file, 2, 20);
+                    }
+                }
+            }
         } else if (!signature_regex.empty()) {
             // 用 signature_regex 做 file_path + commit_message 子串匹配,聚合所有匹配文件
             auto sigs = cm.search_by_signature(repo_full, signature_regex, since_ts, 2000);
@@ -1490,6 +1686,24 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
                 if (!u.empty()) user_changes[u]++;
             }
         }
+
+        // module_def 表为空(大仓库 tree API 超时)且 module_name 像路径时,
+        // 用 module_name 作为 path 前缀匹配 file_timeline(与 file 类型回退逻辑一致)
+        std::string module_matched_prefix;
+        if (timeline.empty() && !module_name.empty() &&
+            module_name.find('/') != std::string::npos) {
+            auto tl_prefix = cm.query_file_timeline(repo_full, module_name,
+                                                     since_ts, 0, 500, true);
+            if (!tl_prefix.empty()) {
+                module_matched_prefix = module_name + "/";
+                for (auto& t : tl_prefix) {
+                    timeline.push_back(t);
+                    std::string u = t.value("author_login", "");
+                    if (!u.empty()) user_changes[u]++;
+                }
+            }
+        }
+
         // contributor_rank 优先从预聚合表读取(已按 total_changes 降序)
         auto mc = cm.query_module_contributors(repo_full, module_name, window_days, 30);
         if (!mc.empty()) {
@@ -1507,12 +1721,19 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
             }
         }
         // related_files:取模块第一个文件的协同文件作为代表
+        std::string first_file;
         if (!files.empty()) {
-            related_files = cm.query_related_files(repo_full, files[0], 2, 20);
+            first_file = files[0];
+        } else if (!timeline.empty()) {
+            first_file = timeline[0].value("file_path", "");
         }
-        // change_density:取模块第一个文件的密度作为代表
-        if (!files.empty()) {
-            change_density = cm.query_change_density(repo_full, files[0], since_ts, 24);
+        if (!first_file.empty()) {
+            related_files = cm.query_related_files(repo_full, first_file, 2, 20);
+            change_density = cm.query_change_density(repo_full, first_file, since_ts, 24);
+        }
+        if (!module_matched_prefix.empty()) {
+            result["prefix_match"] = true;
+            result["matched_path_prefix"] = module_matched_prefix;
         }
     } else if (target_type == "signature") {
         auto sigs = cm.search_by_signature(repo_full, signature_regex, since_ts, 100);
@@ -1576,6 +1797,186 @@ json GitHubClient::module_timeline_analysis(const std::string& owner,
         result["developer_modules"] = developer_modules;
         result["coupled_clusters"]  = coupled_clusters;
     }
+
+    return result;
+}
+
+// ── 原语A:子模块拆分时序切片 ────────────────────────────────
+json GitHubClient::subdir_timeline_slice(const std::string& owner,
+                                          const std::string& repo,
+                                          const std::string& root_path,
+                                          const std::string& time_range,
+                                          bool ingest_first,
+                                          const std::string& branch) {
+    CacheManager& cm = CacheManager::instance();
+    std::string repo_full = owner + "/" + repo;
+
+    json result;
+    result["repo_full_name"] = repo_full;
+    result["root_path"]      = root_path;
+    result["time_range"]     = time_range;
+    if (!branch.empty()) result["branch"] = branch;
+
+    if (!cm.is_ready()) {
+        result["error"] = "cache manager not ready";
+        return result;
+    }
+    if (root_path.empty()) {
+        result["error"] = "root_path required (e.g. drivers/usb)";
+        return result;
+    }
+
+    // 解析 time_range
+    int window_days = 365;
+    if (time_range == "180d") window_days = 180;
+    else if (time_range == "90d") window_days = 90;
+    else if (time_range == "30d") window_days = 30;
+    int64_t since_ts = (int64_t)std::time(nullptr) - (int64_t)window_days * 86400;
+
+    // 增量抓取(复用 module_timeline_analysis 的 path 过滤逻辑)
+    result["ingest_attempted"] = ingest_first;
+    if (ingest_first) {
+        try {
+            int ingested = ingest_recent_commits_timeline(owner, repo, window_days,
+                                                           branch, 50, root_path);
+            result["ingest_records"] = ingested;
+        } catch (const std::exception& e) {
+            result["ingest_error"] = e.what();
+        }
+    }
+
+    // 查询子目录变更密度
+    auto subdirs = cm.query_subdir_change_density(repo_full, root_path, since_ts, 24);
+    result["subdir_count"] = subdirs.size();
+    result["subdirs"]      = subdirs;
+
+    // 汇总统计
+    int total_changes = 0;
+    int total_subdirs = (int)subdirs.size();
+    std::string hottest_subdir;
+    int hottest_changes = 0;
+    for (auto& sd : subdirs) {
+        int ch = sd.value("total_changes", 0);
+        total_changes += ch;
+        if (ch > hottest_changes) {
+            hottest_changes = ch;
+            hottest_subdir  = sd.value("subdir", "");
+        }
+    }
+    result["summary"] = {
+        {"total_subdirs",     total_subdirs},
+        {"total_changes",     total_changes},
+        {"hottest_subdir",    hottest_subdir},
+        {"hottest_changes",   hottest_changes},
+        {"window_days",       window_days}
+    };
+
+    return result;
+}
+
+// ── 原语B:维护链路归因分析 ─────────────────────────────────
+json GitHubClient::maintenance_attribution(const std::string& owner,
+                                            const std::string& repo,
+                                            const std::string& target_path,
+                                            const std::string& time_range,
+                                            bool ingest_first,
+                                            const std::string& branch) {
+    CacheManager& cm = CacheManager::instance();
+    std::string repo_full = owner + "/" + repo;
+
+    json result;
+    result["repo_full_name"] = repo_full;
+    result["target_path"]    = target_path;
+    result["time_range"]     = time_range;
+    if (!branch.empty()) result["branch"] = branch;
+
+    if (!cm.is_ready()) {
+        result["error"] = "cache manager not ready";
+        return result;
+    }
+    if (target_path.empty()) {
+        result["error"] = "target_path required (e.g. drivers/usb)";
+        return result;
+    }
+
+    // 解析 time_range
+    int window_days = 365;
+    if (time_range == "180d") window_days = 180;
+    else if (time_range == "90d") window_days = 90;
+    else if (time_range == "30d") window_days = 30;
+    int64_t since_ts = (int64_t)std::time(nullptr) - (int64_t)window_days * 86400;
+
+    // 增量抓取
+    result["ingest_attempted"] = ingest_first;
+    if (ingest_first) {
+        try {
+            int ingested = ingest_recent_commits_timeline(owner, repo, window_days,
+                                                           branch, 50, target_path);
+            result["ingest_records"] = ingested;
+        } catch (const std::exception& e) {
+            result["ingest_error"] = e.what();
+        }
+    }
+
+    // 查询维护链路归因
+    auto contributors = cm.query_maintenance_attribution(repo_full, target_path,
+                                                          since_ts, 50);
+    result["contributor_count"] = contributors.size();
+    result["contributors"]      = contributors;
+
+    // 拆分维护者和开发者
+    json maintainers = json::array();
+    json developers  = json::array();
+    int total_dev_commits   = 0;
+    int total_merge_commits = 0;
+    for (auto& c : contributors) {
+        if (c.value("role", "") == "maintainer") {
+            maintainers.push_back(c);
+        } else {
+            developers.push_back(c);
+        }
+        total_dev_commits   += c.value("dev_commits", 0);
+        total_merge_commits += c.value("merge_commits", 0);
+    }
+
+    result["maintainers"]        = maintainers;
+    result["developers"]         = developers;
+    result["maintainer_count"]   = maintainers.size();
+    result["developer_count"]    = developers.size();
+    result["total_dev_commits"]  = total_dev_commits;
+    result["total_merge_commits"] = total_merge_commits;
+
+    // 查询 merge commit 样本(用于展示维护流水线)
+    auto timeline = cm.query_file_timeline(repo_full, target_path, since_ts, 0, 200, true);
+    json merge_samples = json::array();
+    for (auto& t : timeline) {
+        std::string msg = t.value("commit_message", "");
+        if (msg.rfind("Merge", 0) == 0) {
+            json sample;
+            sample["commit_hash"]    = t.value("commit_hash", "");
+            sample["author_login"]   = t.value("author_login", "");
+            sample["commit_time"]    = t.value("commit_time", 0);
+            sample["commit_message"] = msg;
+            sample["file_path"]      = t.value("file_path", "");
+            merge_samples.push_back(sample);
+            if (merge_samples.size() >= 10) break;  // 最多 10 个样本
+        }
+    }
+    result["merge_samples"] = merge_samples;
+
+    // 维护流水线摘要
+    result["pipeline_summary"] = {
+        {"total_commits",        total_dev_commits + total_merge_commits},
+        {"dev_commit_ratio",     (total_dev_commits + total_merge_commits) > 0
+                                 ? (double)total_dev_commits / (total_dev_commits + total_merge_commits)
+                                 : 0.0},
+        {"merge_commit_ratio",   (total_dev_commits + total_merge_commits) > 0
+                                 ? (double)total_merge_commits / (total_dev_commits + total_merge_commits)
+                                 : 0.0},
+        {"maintainer_count",     maintainers.size()},
+        {"developer_count",      developers.size()},
+        {"window_days",          window_days}
+    };
 
     return result;
 }

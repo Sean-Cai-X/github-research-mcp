@@ -7,6 +7,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include "webview_client.hpp"
+#include "curl_http_client.hpp"
 #include "errors.hpp"
 
 namespace github_research {
@@ -15,12 +16,20 @@ using json = nlohmann::json;
 
 // GitHub REST API 客户端
 // 迁移自 DeerFlow skills/public/github-deep-research/scripts/github_api.py
-// 保留所有方法语义与返回 JSON 字段名不变,仅改语言与 HTTP 后端(WebView2)
-// 技术栈统一:整个项目仅使用 WebView2,无 HTTP API fallback
+// 保留所有方法语义与返回 JSON 字段名不变,仅改语言与 HTTP 后端
+// 混合方案:GitHub API 默认走 libcurl(轻量纯 HTTP),可切换 WebView2(浏览器指纹)
+// 网页源(arXiv/HN/PWC 等)仍统一使用 WebView2
 class GitHubClient {
 public:
+    // HTTP 后端选择
+    enum class Backend {
+        Curl,      // libcurl:纯 HTTP,无浏览器依赖,适用于 GitHub REST API(默认)
+        WebView2   // WebView2:浏览器内核,适用于需要 JS 渲染/浏览器指纹的场景
+    };
+
     explicit GitHubClient(std::optional<std::string> token = std::nullopt,
-                          int timeout_seconds = 30);
+                          int timeout_seconds = 30,
+                          Backend backend = Backend::Curl);
 
     // === 10 个 GitHub API 方法(对应 10 个 MCP tool) ===
 
@@ -174,12 +183,13 @@ public:
     // since_days: 拉取近 N 天的 commits
     // branch: 分支名(空表示默认分支)
     // max_commits: 单次最多处理的 commit 数(防止 API 超限)
-    // 返回: 新增的 file_timeline 记录总数
+    // path: 按文件/目录路径过滤 commits(大仓库必传,避免全量拉取超时)
     int ingest_recent_commits_timeline(const std::string& owner,
                                         const std::string& repo,
                                         int since_days = 365,
                                         const std::string& branch = "",
-                                        int max_commits = 100);
+                                        int max_commits = 100,
+                                        const std::string& path = "");
 
     // 18. github_module_timeline_analysis - 三层职责统一入口
     //   target_type: "file" / "module" / "signature"
@@ -206,41 +216,67 @@ public:
                                    bool ingest_first = true,
                                    const std::string& branch = "");
 
-    // WebView2 是否就绪
-    bool is_ready() const { return http_client_.is_ready(); }
+    // 19. github_subdir_timeline_slice - 原语A:子模块拆分时序切片
+    //   按一级子目录分组,分别生成独立变更密度曲线,实现热点迁徙观测
+    //   root_path 如 "drivers/usb",自动扫描 typec/gadget/host/serial/core 等子目录
+    //   返回:{subdirs:[{subdir, full_path, total_changes, monthly_density:[...]}], summary}
+    json subdir_timeline_slice(const std::string& owner,
+                                const std::string& repo,
+                                const std::string& root_path,
+                                const std::string& time_range = "1y",
+                                bool ingest_first = true,
+                                const std::string& branch = "");
+
+    // 20. github_maintenance_attribution - 原语B:维护链路归因分析
+    //   区分开发提交 vs 合并提交(Merge commit),还原内核维护流水线
+    //   社区开发者 → 子系统维护者(gregkh)收集 → 补丁集 tag → 主线合并(torvalds)
+    //   返回:{contributors:[{author_login, role, dev_commits, merge_commits, merge_ratio, ...}],
+    //         maintainers:[...], developers:[...], merge_samples:[...]}
+    json maintenance_attribution(const std::string& owner,
+                                  const std::string& repo,
+                                  const std::string& target_path,
+                                  const std::string& time_range = "1y",
+                                  bool ingest_first = true,
+                                  const std::string& branch = "");
+
+    // 后端是否就绪
+    bool is_ready() const { return http_client_->is_ready(); }
 
     // 设置代理(必须在首次请求前调用)
-    // 传递给 Chromium --proxy-server(单一技术栈:仅 WebView2)
+    // libcurl:CURLOPT_PROXY;WebView2:Chromium --proxy-server
     void set_proxy(const std::string& proxy_url) {
         proxy_url_ = proxy_url;
         if (!proxy_url.empty()) {
-            http_client_.set_proxy(proxy_url);
+            http_client_->set_proxy(proxy_url);
         }
     }
 
-    // 设置独立 user data dir(必须在首次请求前调用)
-    // 用于 8 源会话隔离,避免 GitHub 后端与其他源共用默认路径导致 0x800700aa
+    // 设置独立 user data dir(仅 WebView2 后端生效,libcurl 后端为 no-op)
+    // 用于 8 源会话隔离,避免与其他源共用默认路径导致 0x800700aa
     void set_user_data_dir(const std::string& dir) {
-        http_client_.set_user_data_dir(dir);
+        user_data_dir_ = dir;
+        if (backend_ == Backend::WebView2) {
+            static_cast<WebViewClient*>(http_client_.get())->set_user_data_dir(dir);
+        }
     }
 
-    // 当前使用的后端名称(恒为 "webview2",单一技术栈)
+    // 当前使用的后端名称("libcurl" 或 "webview2")
     std::string backend_name() const {
-        return "webview2";
+        return http_client_->backend_name();
     }
 
-    // 首次请求前确保 WebView2 后端已就绪
-    // 返回 false 表示 WebView2 不可用(Edge Runtime 缺失或环境创建失败)
+    // 首次请求前确保后端已就绪
+    // 返回 false 表示后端不可用(libcurl 链接失败 / WebView2 Edge Runtime 缺失)
     bool ensure_ready() {
-        if (http_client_.is_ready()) return true;
+        if (http_client_->is_ready()) return true;
 
-        std::cerr << "[github] initializing WebView2 backend..." << std::endl;
-        if (http_client_.initialize()) {
-            std::cerr << "[github] WebView2 backend ready" << std::endl;
+        std::cerr << "[github] initializing " << backend_name() << " backend..." << std::endl;
+        if (http_client_->initialize()) {
+            std::cerr << "[github] " << backend_name() << " backend ready" << std::endl;
             return true;
         }
 
-        std::cerr << "[github] ERROR: WebView2 init failed (no fallback, single tech stack)"
+        std::cerr << "[github] ERROR: " << backend_name() << " init failed (no fallback)"
                   << std::endl;
         return false;
     }
@@ -263,7 +299,9 @@ private:
     static std::string build_url(const std::string& endpoint,
                                  const std::map<std::string, std::string>& params = {});
 
-    WebViewClient http_client_;
+    std::unique_ptr<IHttpClient> http_client_;
+    Backend backend_ = Backend::Curl;
+    std::string user_data_dir_;  // 仅 WebView2 后端使用
     int timeout_seconds_ = 30;
     std::string proxy_url_;
     std::map<std::string, std::string> headers_;

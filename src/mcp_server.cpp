@@ -1014,7 +1014,8 @@ json McpServer::handle_tools_list() {
                 {"description", "Batch-ingest recent commits (since_days) into file_timeline + file_cooccurrence. "
                                 "Paginates commits list (per_page=100, max 10 pages), then calls per-commit detail API. "
                                 "Already-ingested commits are skipped via UNIQUE constraint (still costs 1 API call per commit). "
-                                "Returns records_inserted total. Use to populate local index before module_timeline_analysis."},
+                                "Returns records_inserted total. Use to populate local index before module_timeline_analysis. "
+                                "For large repos (linux/chromium), MUST pass 'path' to filter by directory to avoid timeout."},
                 {"inputSchema", json::object({
                     {"type", "object"},
                     {"properties", json::object({
@@ -1022,7 +1023,8 @@ json McpServer::handle_tools_list() {
                         {"repo", json::object({{"type","string"},{"description","Repo name"}})},
                         {"since_days", json::object({{"type","integer"},{"default",365},{"minimum",1},{"maximum",365}})},
                         {"branch", json::object({{"type","string"},{"default",""},{"description","Branch name (empty = default branch)"}})},
-                        {"max_commits", json::object({{"type","integer"},{"default",100},{"minimum",1},{"maximum",500}})}
+                        {"max_commits", json::object({{"type","integer"},{"default",100},{"minimum",1},{"maximum",500}})},
+                        {"path", json::object({{"type","string"},{"default",""},{"description","Filter commits by file/directory path (e.g. drivers/net). CRITICAL for large repos to avoid full-scan timeout."}})}
                     })},
                     {"required", json::array({"owner","repo"})}
                 })}
@@ -1052,6 +1054,50 @@ json McpServer::handle_tools_list() {
                         {"branch", json::object({{"type","string"},{"default",""},{"description","Branch name for non-default branch (e.g. codex/cxcore-integration). Empty = default branch"}})}
                     })},
                     {"required", json::array({"owner","repo","target_type"})}
+                })}
+            },
+            // === 原语A:子模块拆分时序切片 ===
+            {
+                {"name", "github_subdir_timeline_slice"},
+                {"description", "Sub-module timeline slicing: group by first-level subdirectory under root_path, "
+                                "generate independent change-density curves per subdir to observe hotspot migration. "
+                                "Example: root_path=drivers/usb -> subdirs: typec/gadget/host/serial/core/..., "
+                                "each with monthly change counts, author counts, lines added/deleted. "
+                                "Reveals trend shifts (e.g. host controllers in early years -> typec/gadget recently). "
+                                "Requires prior ingest (set ingest_first=true for auto-ingest with path filter)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"root_path", json::object({{"type","string"},{"description","Root directory path to slice (e.g. drivers/usb). Accepts target_path as alias."}})},
+                        {"time_range", json::object({{"type","string"},{"default","1y"},{"enum", json::array({"1y","180d","90d","30d"})}})},
+                        {"ingest_first", json::object({{"type","boolean"},{"default",true},{"description","Auto-ingest recent commits with path filter before query"}})},
+                        {"branch", json::object({{"type","string"},{"default",""},{"description","Branch name (empty = default branch)"}})}
+                    })},
+                    {"required", json::array({"owner","repo","root_path"})}
+                })}
+            },
+            // === 原语B:维护链路归因分析 ===
+            {
+                {"name", "github_maintenance_attribution"},
+                {"description", "Maintenance chain attribution: distinguish merge commits vs development commits, "
+                                "restore kernel maintenance pipeline (developer -> subsystem maintainer -> patch tag -> mainline merge). "
+                                "Merge commit detection: commit_message starts with 'Merge'. "
+                                "Returns: contributors with role(maintainer/developer), dev/merge commit counts, merge_ratio, "
+                                "plus merge_samples showing actual merge commit messages (e.g. 'Merge tag usb-7.2-rc3'). "
+                                "Identifies key maintainers (e.g. torvalds, gregkh) vs active developers."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"owner", json::object({{"type","string"},{"description","Repo owner"}})},
+                        {"repo", json::object({{"type","string"},{"description","Repo name"}})},
+                        {"target_path", json::object({{"type","string"},{"description","Directory path to analyze (e.g. drivers/usb). Accepts path as alias."}})},
+                        {"time_range", json::object({{"type","string"},{"default","1y"},{"enum", json::array({"1y","180d","90d","30d"})}})},
+                        {"ingest_first", json::object({{"type","boolean"},{"default",true},{"description","Auto-ingest recent commits with path filter before query"}})},
+                        {"branch", json::object({{"type","string"},{"default",""},{"description","Branch name (empty = default branch)"}})}
+                    })},
+                    {"required", json::array({"owner","repo","target_path"})}
                 })}
             },
             // ========== arXiv 工具集(4 个 arxiv_*) ==========

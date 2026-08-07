@@ -1,14 +1,14 @@
 # github-research-mcp (DeerFlow++)
 
-8 源统一研究 MCP 服务,基于 **单一 WebView2 技术栈** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)**。
+8 源统一研究 MCP 服务,基于 **混合技术栈(libcurl + WebView2)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
 
 ## 特性
 
-- **8 源 65 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
-- **单一技术栈**:一个基类 `WebViewSession`,一种调用模式 `Navigate + ExecuteScript`,一种错误处理范式,一种日志输出格式,一种限流策略
-- **无 HTTP API 依赖**:不混入 WinHTTP / libcurl / cpr,避免两套网络层 / 两套错误处理 / 两套限流逻辑 / 两套调试方式
-- **统一原始文本提取**:所有工具统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI,工具不做复杂选择器适配
-- **多实例会话隔离**:每个数据源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
+- **8 源 67 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走 **WebView2**(完整 Chromium 指纹、JS 渲染、DOM 提取)
+- **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
+- **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
+- **多实例会话隔离**:每个网页源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
 - **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
 - **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
 - **统一 SQLite 缓存层(WAL + 5 张表)**:cache_entries / cache_blobs / entities / relations / metrics
@@ -16,11 +16,12 @@
 - **熔断器 + 降级链**:主源失败自动切换备用源,所有源失败返回陈旧缓存(stale)
 - **Entity Mapper + 关系图谱**:自动注册实体、建立跨源关系、记录时间快照
 - **三层观测体系**:L1 项目概览(13 个 github_* 工具) / L2 单点深挖(局部对象连续动态分析索引) / L3 关联图谱(跨源 entity + relations)
+- **模块演进时序分析原语**:`github_subdir_timeline_slice`(子模块拆分时序切片) + `github_maintenance_attribution`(维护链路归因),还原 Linux 内核等大仓库的维护流水线
 - **跨源闭合**:HN story 自动检测 `source_url` 中的 arxiv.org,建立 `story -[mentions]-> paper` 跨源关系
 
 ## 架构
 
-### 单一技术栈 + 三层观测体系
+### 混合技术栈(libcurl + WebView2)+ 三层观测体系
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -30,18 +31,21 @@
                  ▼
 ┌────────────────────────────────────────────────────────────────┐
 │  dispatch_<source>_tool  (按工具名前缀路由)                      │
-│  github_* (18) / arxiv_* (6) / hn_* (7) / pkg_* (4) /          │
+│  github_* (20) / arxiv_* (6) / hn_* (7) / pkg_* (4) /          │
 │  pwc_*   (5) / hf_*   (7) / s2_*    (6) / so_*    (5)          │
 │  + github_module_timeline_analysis (L2/L3)                      │
+│  + github_subdir_timeline_slice    (原语A:子模块切片)            │
+│  + github_maintenance_attribution  (原语B:维护链路归因)          │
 │  + github_fetch_repo_detail / github_fetch_relation_network     │
 │  + github_search_index / github_ingest_*                        │
-└────────────────┬───────────────────────────────────────────────┘
+└────────────────┬───────────────────────────────────────────────────────┘
                  │
    ┌─────────────┼─────────────┬─────────────┬─────────────┐
    ▼             ▼             ▼             ▼             ▼
 ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
 │GitHub│ │arXiv │ │  HN  │ │ Pkg  │ │ PWC  │ │ ...  │
 │Client│ │Session│ │Session│ │Session│ │Session│ │ ...
+│libcurl│ │WebView2│ │WebView2│ │WebView2│ │WebView2│ │
 │  +   │ │  +   │ │  +   │ │      │ │      │ │
 │Cache │ │Cache │ │Cache │ │Cache │ │Cache │ │
 │ +Entity +Entity +Entity                                    │
@@ -52,11 +56,11 @@
         ┌────────────────┴────────────────┐
         ▼                                 ▼
 ┌──────────────────┐         ┌──────────────────────────┐
-│  WebView2 基类    │         │  SQLite 统一缓存层         │
-│  Navigate + Exec │         │  - cache_entries/blobs    │
-│  Script          │         │  - entities / relations   │
-│                  │         │  - metrics (时间序列)      │
-│                  │         │  + source_fusion           │
+│ libcurl 8.20     │         │  SQLite 统一缓存层         │
+│ (GitHub API)     │         │  - cache_entries/blobs    │
+│ + WebView2 基类   │         │  - entities / relations   │
+│ (7 网页源)        │         │  - metrics (时间序列)      │
+│ Navigate+ExecScript         │  + source_fusion           │
 │                  │         │  + circuit breaker         │
 │                  │         │  + fallback chain          │
 └──────────────────┘         └──────────────────────────┘

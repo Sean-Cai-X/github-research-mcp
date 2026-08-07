@@ -10,20 +10,15 @@
 #include <unknwn.h>
 #include "WebView2.h"            // 新版 SDK 已合并 WebView2Environment.h
 #include "WebView2EnvironmentOptions.h"
+#include "http_client.hpp"       // IHttpClient 抽象基类
 
 namespace github_research {
-
-// HTTP 响应结构
-struct HttpResponse {
-    int status_code = 0;
-    std::string body;
-    std::map<std::string, std::string> headers;  // 小写键
-};
 
 // WebView2 浏览器链路 HTTP 客户端
 // 利用 Chromium 内核完整浏览器指纹(TLS JA3 / HTTP/2 / Headers 顺序 / JS 执行)
 // 通过隐藏窗口 + ExecuteScript(fetch) 实现 headless HTTP 请求
-class WebViewClient {
+// 继承 IHttpClient,允许 GitHubClient 在 WebView2 与 libcurl 之间切换
+class WebViewClient : public IHttpClient {
 public:
     WebViewClient(const std::string& user_agent,
                   int timeout_seconds = 30,
@@ -36,12 +31,12 @@ public:
 
     // 初始化 WebView2 环境(构造后必须调用一次)
     // 返回 false 表示 Edge Runtime 缺失或环境创建失败
-    bool initialize();
+    bool initialize() override;
 
     // 设置代理(必须在 initialize() 前调用)
     // url 格式:http://127.0.0.1:7897 或 http://user:pass@host:port
     // 传递给 WebView2 的 Chromium 内核 --proxy-server 参数
-    void set_proxy(const std::string& proxy_url) { proxy_url_ = proxy_url; }
+    void set_proxy(const std::string& proxy_url) override { proxy_url_ = proxy_url; }
 
     // 设置用户数据目录(必须在 initialize() 前调用)
     // 用于隔离 GitHub 后端与其他会话,避免 user data dir 冲突 (0x800700aa)
@@ -55,10 +50,13 @@ public:
     // url: 完整 URL,如 https://api.github.com/repos/owner/repo
     // headers: 自定义请求头
     HttpResponse get(const std::string& url,
-                     const std::map<std::string, std::string>& headers = {});
+                     const std::map<std::string, std::string>& headers = {}) override;
 
     // 是否已初始化就绪
-    bool is_ready() const { return ready_.load(); }
+    bool is_ready() const override { return ready_.load(); }
+
+    // 后端名称
+    std::string backend_name() const override { return "webview2"; }
 
 private:
     // COM 初始化

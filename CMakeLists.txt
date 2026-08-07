@@ -41,6 +41,35 @@ if(NOT EXISTS ${SQLITE_INCLUDE_DIR}/sqlite3.h)
     message(FATAL_ERROR "SQLite3 not found at third_party/sqlite/sqlite3.h")
 endif()
 
+# === libcurl: 优先 vcpkg,否则用 third_party/curl 官方预编译包 ===
+# 用于 CurlHttpClient(GitHub REST API 纯 JSON 调用),与 WebView2 并存的混合方案
+find_package(CURL CONFIG QUIET)
+if(NOT CURL_FOUND)
+    # 查找 third_party/curl 下的预编译包目录(curl-<ver>-win64-mingw)
+    file(GLOB CURL_DIRS "${CMAKE_SOURCE_DIR}/third_party/curl/curl-*-win64-mingw")
+    if(CURL_DIRS)
+        list(SORT CURL_DIRS COMPARE NATURAL)
+        list(REVERSE CURL_DIRS)
+        list(GET CURL_DIRS 0 CURL_ROOT_DIR)
+        set(CURL_INCLUDE_DIR ${CURL_ROOT_DIR}/include)
+        set(CURL_LIB_DIR ${CURL_ROOT_DIR}/lib)
+        set(CURL_BIN_DIR ${CURL_ROOT_DIR}/bin)
+        if(NOT EXISTS ${CURL_INCLUDE_DIR}/curl/curl.h)
+            message(FATAL_ERROR "libcurl headers not found at ${CURL_INCLUDE_DIR}/curl/curl.h")
+        endif()
+        if(NOT EXISTS ${CURL_LIB_DIR}/libcurl.lib)
+            message(FATAL_ERROR
+                "libcurl.lib not found. Generate it with MSVC lib.exe:\n"
+                "  lib /machine:x64 /def:\"${CURL_BIN_DIR}/libcurl-x64.def\" /out:\"${CURL_LIB_DIR}/libcurl.lib\"")
+        endif()
+        message(STATUS "libcurl (prebuilt): ${CURL_ROOT_DIR}")
+    else()
+        message(FATAL_ERROR
+            "libcurl not found. Download official Windows build from https://curl.se/windows/ \n"
+            "and extract to: ${CMAKE_SOURCE_DIR}/third_party/curl/")
+    endif()
+endif()
+
 add_executable(research-mcp
     src/main.cpp
     src/mcp_server.cpp
@@ -52,6 +81,7 @@ add_executable(research-mcp
     src/webview_client.cpp
     src/webview_session.cpp
     src/webview_helpers.cpp
+    src/curl_http_client.cpp
     src/arxiv_tools.cpp
     src/hackernews_tools.cpp
     src/package_tools.cpp
@@ -69,6 +99,7 @@ target_include_directories(research-mcp PRIVATE
     ${JSON_INCLUDE_DIR}
     ${WEBVIEW2_INCLUDE_DIR}
     ${SQLITE_INCLUDE_DIR}
+    ${CURL_INCLUDE_DIR}
 )
 
 if(TARGET nlohmann_json::nlohmann_json)
@@ -81,6 +112,13 @@ else()
     target_link_libraries(research-mcp PRIVATE ${WEBVIEW2_LIB_DIR}/WebView2Loader.dll.lib)
 endif()
 
+# libcurl 链接(预编译包:动态链接 libcurl-x64.dll + 导入库 libcurl.lib)
+if(TARGET CURL::libcurl)
+    target_link_libraries(research-mcp PRIVATE CURL::libcurl)
+elseif(EXISTS ${CURL_LIB_DIR}/libcurl.lib)
+    target_link_libraries(research-mcp PRIVATE ${CURL_LIB_DIR}/libcurl.lib)
+endif()
+
 # Windows 系统库
 target_link_libraries(research-mcp PRIVATE
     user32      # 窗口 API
@@ -88,6 +126,8 @@ target_link_libraries(research-mcp PRIVATE
     oleaut32    # COM 辅助
     runtimeobject  # Microsoft::WRL::Callback
     ws2_32      # WinSock(HTTP 模式)
+    crypt32     # libcurl HTTPS 证书存储
+    bcrypt      # libcurl Schannel/加密原语
 )
 
 # 复制 WebView2Loader.dll 到输出目录
@@ -97,6 +137,17 @@ if(EXISTS ${WEBVIEW2_DLL_PATH})
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${WEBVIEW2_DLL_PATH}
         $<TARGET_FILE_DIR:research-mcp>/WebView2Loader.dll)
+endif()
+
+# 复制 libcurl-x64.dll 和 CA 证书到输出目录(运行时依赖)
+if(EXISTS ${CURL_BIN_DIR}/libcurl-x64.dll)
+    add_custom_command(TARGET research-mcp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CURL_BIN_DIR}/libcurl-x64.dll
+        $<TARGET_FILE_DIR:research-mcp>/libcurl-x64.dll
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CURL_BIN_DIR}/curl-ca-bundle.crt
+        $<TARGET_FILE_DIR:research-mcp>/curl-ca-bundle.crt)
 endif()
 
 # Windows 静态链接 CRT

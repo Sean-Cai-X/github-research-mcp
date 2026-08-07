@@ -270,11 +270,14 @@ public:
                              const std::string& commit_message = "");
 
     // 查询文件时序变更记录(按时间升序)
+    // prefix_match=true 时按 file_path 前缀匹配(目录查询:传入 "drivers/net" 可匹配
+    //   "drivers/net/eth0.c" 等所有子文件),用于 target_path 为目录的场景
     std::vector<json> query_file_timeline(const std::string& repo_full_name,
                                            const std::string& file_path,
                                            int64_t since = 0,
                                            int64_t until = 0,
-                                           int limit = 500);
+                                           int limit = 500,
+                                           bool prefix_match = false);
 
     // ── 模块定义 ─────────────────────────────────────────────
     // 注册/更新模块定义,返回模块 id(失败返回 0)
@@ -336,6 +339,24 @@ public:
                                                const std::string& user_login,
                                                int window_days = 365,
                                                int limit = 30);
+
+    // ── 子模块拆分时序切片(原语A) ────────────────────────────
+    // 按一级子目录聚合变更密度曲线,实现热点迁徙观测
+    // root_path 如 "drivers/usb",自动扫描 file_timeline 中所有前缀为
+    //   "drivers/usb/<subdir>/" 的 file_path,按 subdir 分组返回月度统计
+    std::vector<json> query_subdir_change_density(const std::string& repo_full_name,
+                                                   const std::string& root_path,
+                                                   int64_t since = 0,
+                                                   int limit = 24);
+
+    // ── 维护链路归因(原语B) ──────────────────────────────────
+    // 区分开发提交 vs 合并提交(Merge commit),还原维护流水线
+    // merge commit 识别规则:commit_message 以 "Merge" 开头
+    // 返回 [{author_login, commit_type, commit_count, first_time, last_time, sample_messages}]
+    std::vector<json> query_maintenance_attribution(const std::string& repo_full_name,
+                                                     const std::string& path_prefix,
+                                                     int64_t since = 0,
+                                                     int limit = 50);
 
 private:
     CacheManager() = default;

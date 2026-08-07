@@ -326,7 +326,9 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
             if (!err.empty()) return make_error_result(err);
             int max_commits = get_int_arg(args, "max_commits", 100, 1, 500, err);
             if (!err.empty()) return make_error_result(err);
-            int n = client.ingest_recent_commits_timeline(owner, repo, since_days, branch, max_commits);
+            std::string ingest_path = get_string_arg(args, "path", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            int n = client.ingest_recent_commits_timeline(owner, repo, since_days, branch, max_commits, ingest_path);
             json r = {
                 {"success", true},
                 {"repo_full_name", owner + "/" + repo},
@@ -371,6 +373,50 @@ json dispatch_tool_call(GitHubClient& client, const json& params) {
                                                       target_path, module_name,
                                                       signature_regex, time_range,
                                                       layer, ingest_first, branch);
+            return make_success_result(r.dump(-1, ' ', false, json::error_handler_t::replace));
+
+        } else if (tool_name == "github_subdir_timeline_slice") {
+            // 原语A:子模块拆分时序切片
+            std::string root_path = get_string_arg(args, "root_path", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            // 兼容:模型可能传 target_path 而非 root_path
+            if (root_path.empty()) {
+                root_path = get_string_arg(args, "target_path", tool_name, false, err);
+                if (!err.empty()) return make_error_result(err);
+            }
+            std::string time_range = get_string_arg(args, "time_range", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            if (time_range.empty()) time_range = "1y";
+            bool ingest_first = true;
+            if (args.contains("ingest_first") && args["ingest_first"].is_boolean()) {
+                ingest_first = args["ingest_first"].get<bool>();
+            }
+            std::string branch = get_string_arg(args, "branch", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.subdir_timeline_slice(owner, repo, root_path,
+                                                   time_range, ingest_first, branch);
+            return make_success_result(r.dump(-1, ' ', false, json::error_handler_t::replace));
+
+        } else if (tool_name == "github_maintenance_attribution") {
+            // 原语B:维护链路归因分析
+            std::string target_path = get_string_arg(args, "target_path", tool_name, true, err);
+            if (!err.empty()) return make_error_result(err);
+            // 兼容:模型可能传 path 而非 target_path
+            if (target_path.empty()) {
+                target_path = get_string_arg(args, "path", tool_name, false, err);
+                if (!err.empty()) return make_error_result(err);
+            }
+            std::string time_range = get_string_arg(args, "time_range", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            if (time_range.empty()) time_range = "1y";
+            bool ingest_first = true;
+            if (args.contains("ingest_first") && args["ingest_first"].is_boolean()) {
+                ingest_first = args["ingest_first"].get<bool>();
+            }
+            std::string branch = get_string_arg(args, "branch", tool_name, false, err);
+            if (!err.empty()) return make_error_result(err);
+            json r = client.maintenance_attribution(owner, repo, target_path,
+                                                     time_range, ingest_first, branch);
             return make_success_result(r.dump(-1, ' ', false, json::error_handler_t::replace));
 
         } else {
