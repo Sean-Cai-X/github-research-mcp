@@ -63,6 +63,28 @@ jobs:
       - name: 加载 MSVC 编译环境
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: 下载 libcurl 官方预编译包并生成 libcurl.lib
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          # CMakeLists 期望 third_party/curl/curl-*-win64-mingw 目录,内含 include/curl/curl.h 与 bin/libcurl-x64.def
+          $dst = "third_party/curl"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $zip = "$dst/curl-mingw.zip"
+          Invoke-WebRequest -Uri "https://curl.se/windows/dl-8.20.0_4/curl-8.20.0_4-win64-mingw.zip" `
+            -OutFile $zip -MaximumRedirection 10
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          Remove-Item $zip -Force
+          $curlDir = Get-ChildItem -Path $dst -Directory -Filter "curl-*-win64-mingw" | Select-Object -First 1
+          if (-not $curlDir) { throw "未找到 curl-*-win64-mingw 目录" }
+          # 用 MSVC lib.exe 从 def 生成 libcurl.lib(CMakeLists 第 60 行校验 lib/libcurl.lib)
+          lib /machine:x64 /def:"$($curlDir.FullName)/bin/libcurl-x64.def" /out:"$($curlDir.FullName)/lib/libcurl.lib"
+          Write-Host "libcurl 就位: $($curlDir.FullName)"
+          Get-ChildItem -Recurse $curlDir.FullName |
+            Where-Object { $_.Name -match 'curl\.h$|libcurl\.lib$|libcurl-x64\.dll$' } |
+            Select-Object FullName
+
       - name: CMake 配置 + 编译 Release(静态 CRT 已在 CMakeLists 固化为 /MT)
         shell: pwsh
         run: |
@@ -98,6 +120,17 @@ jobs:
             Copy-Item $dllSrc "deploy/"
           } else {
             Write-Host "::warning::未找到 WebView2Loader.dll,纯净机器运行会失败"
+          }
+
+          # libcurl-x64.dll + CA 证书(POST_BUILD 已复制到 exe 同目录,libcurl HTTPS 运行时依赖)
+          foreach ($rt in @("libcurl-x64.dll", "curl-ca-bundle.crt")) {
+            $rtSrc = "build-release/Release/$rt"
+            if (-not (Test-Path $rtSrc)) { $rtSrc = "build-release/$rt" }
+            if (Test-Path $rtSrc) {
+              Copy-Item $rtSrc "deploy/"
+            } else {
+              Write-Host "::warning::未找到 $rt,libcurl HTTPS 可能失败"
+            }
           }
 
           # 附带配置示例(可选)

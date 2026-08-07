@@ -279,7 +279,7 @@ hn_story:49186720 ─[mentions]─→ arxiv_paper:2510.01395 ─[authored_by]─
 
 1. 前往 [Releases](../../releases) 页面
 2. 下载 `research-mcp-windows-x64.zip`
-3. 解压后直接运行 `research-mcp.exe`(zip 内已附带 `WebView2Loader.dll`)
+3. 解压后直接运行 `research-mcp.exe`(zip 内已附带 `WebView2Loader.dll` + `libcurl-x64.dll` + `curl-ca-bundle.crt`)
 
 启动示例(解压目录下):
 
